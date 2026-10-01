@@ -1,0 +1,13 @@
+.venv/
+.playwright/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.env
+.env.*
+work/
+*.log
+.DS_Store
+Thumbs.db
+
