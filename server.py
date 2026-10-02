@@ -1,4 +1,4 @@
-import os,json,re,zipfile,io,html,ipaddress,socket,urllib.request,urllib.parse,urllib.error,base64,uuid
+import os,json,re,zipfile,io,html,ipaddress,socket,urllib.request,urllib.parse,urllib.error,base64,uuid,threading
 from html.parser import HTMLParser
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
 from email.parser import BytesParser
@@ -8,6 +8,8 @@ from engine import parse_jd,analyze
 from intelligence import analyze as analyze_intelligence
 
 ROOT=os.path.dirname(__file__)
+_OCR=None
+_OCR_LOCK=threading.Lock()
 FALLBACK='该岗位链接暂时无法自动读取；如平台要求登录、验证码或已下架，请上传岗位截图或粘贴 JD 文字。'
 JOB_PLATFORMS={
  'zhipin.com':'BOSS直聘','liepin.com':'猎聘','zhaopin.com':'智联招聘',
@@ -227,13 +229,20 @@ def image_mime(item):
   ext=os.path.splitext(str(item.get('name') or ''))[1].lower()
   mime={'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp'}.get(ext,'')
  return mime
+def ocr_engine():
+ global _OCR
+ if _OCR is None:
+  with _OCR_LOCK:
+   if _OCR is None:
+    from rapidocr import RapidOCR
+    _OCR=RapidOCR()
+ return _OCR
 def vision(images):
  """Run fully local OCR for one or more JD screenshots."""
  if not isinstance(images,list) or not 1<=len(images)<=10:raise ValueError('请选择 1～10 张岗位截图。')
  total=0;parts=[]
  try:
-  from rapidocr import RapidOCR
-  ocr=RapidOCR()
+  ocr=ocr_engine()
   for index,item in enumerate(images,1):
    mime=image_mime(item);data=base64.b64decode(item.get('data',''),validate=True)
    if mime not in ('image/png','image/jpeg','image/webp'):raise ValueError('截图支持 PNG、JPG、WEBP。')
