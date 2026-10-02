@@ -10,6 +10,7 @@ from intelligence import analyze as analyze_intelligence
 ROOT=os.path.dirname(__file__)
 _OCR=None
 _OCR_LOCK=threading.Lock()
+_OCR_RUN_LOCK=threading.Lock()
 FALLBACK='该岗位链接暂时无法自动读取；如平台要求登录、验证码或已下架，请上传岗位截图或粘贴 JD 文字。'
 JOB_PLATFORMS={
  'zhipin.com':'BOSS直聘','liepin.com':'猎聘','zhaopin.com':'智联招聘',
@@ -97,9 +98,7 @@ def read_pdf(data):
    # A page number or watermark alone is not a usable text layer.
    if len(re.sub(r'\s+','',text))<20:
     try:
-     if ocr is None:
-      from rapidocr import RapidOCR
-      ocr=RapidOCR()
+     if ocr is None:ocr=ocr_engine()
      pix=page.get_pixmap(matrix=pymupdf.Matrix(2,2),alpha=False)
      text='\n'.join(_ocr_lines(ocr(pix.tobytes('png')))).strip()
     except Exception as exc:
@@ -237,6 +236,17 @@ def ocr_engine():
     from rapidocr import RapidOCR
     _OCR=RapidOCR()
  return _OCR
+def optimize_ocr_image(data,max_pixels=900000):
+ from PIL import Image,ImageOps
+ try:
+  image=ImageOps.exif_transpose(Image.open(io.BytesIO(data)))
+  if image.width*image.height>40000000:raise ValueError('截图像素过大，请先裁剪后上传。')
+  scale=min(1,(max_pixels/max(1,image.width*image.height))**.5)
+  if scale<1:image=image.resize((max(1,int(image.width*scale)),max(1,int(image.height*scale))),Image.Resampling.LANCZOS)
+  image=image.convert('RGB');stream=io.BytesIO();image.save(stream,'JPEG',quality=88,optimize=True)
+  return stream.getvalue()
+ except ValueError:raise
+ except Exception as exc:raise ValueError('图片格式无法读取，请改用清晰的 JPG 或 PNG 截图。') from exc
 def vision(images):
  """Run fully local OCR for one or more JD screenshots."""
  if not isinstance(images,list) or not 1<=len(images)<=10:raise ValueError('请选择 1～10 张岗位截图。')
@@ -249,7 +259,8 @@ def vision(images):
    if len(data)>8*1024*1024:raise ValueError('每张截图不得超过 8 MB。')
    total+=len(data)
    if total>24*1024*1024:raise ValueError('全部截图合计不得超过 24 MB。')
-   text='\n'.join(_ocr_lines(ocr(data))).strip()
+   optimized=optimize_ocr_image(data)
+   with _OCR_RUN_LOCK:text='\n'.join(_ocr_lines(ocr(optimized))).strip()
    if text:parts.append('【截图 '+str(index)+'】\n'+text)
  except ValueError:raise
  except Exception as exc:raise ValueError('本地 OCR 识别失败，请确认截图清晰完整。') from exc
@@ -320,4 +331,4 @@ class Handler(BaseHTTPRequestHandler):
   except ValueError as e:return self.send(400,{'error':str(e)})
   except Exception as e:return self.send(500,{'error':'处理失败，请检查文件或重试。'})
 if __name__=='__main__':
- port=int(os.environ.get('PORT','8765'));print(f'JobFit http://127.0.0.1:{port}',flush=True);ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()
+ port=int(os.environ.get('PORT','8765'));ocr_engine();print(f'JobFit http://127.0.0.1:{port}',flush=True);ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()

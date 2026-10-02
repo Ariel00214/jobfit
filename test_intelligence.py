@@ -1,7 +1,7 @@
-import os,sys,unittest
+import os,sys,unittest,io
 sys.path.insert(0,os.path.dirname(__file__))
 from intelligence import parse_resume,parse_jd,analyze,action_plan
-from server import extract_job_payload,full_analysis,image_mime
+from server import extract_job_payload,full_analysis,image_mime,optimize_ocr_image
 from engine import parse_jd as parse_legacy_jd
 
 RESUME='''张三 产品运营 2021.01-2024.01 某科技公司
@@ -46,5 +46,10 @@ class JobFitTests(unittest.TestCase):
   self.assertEqual(image_mime({'name':'岗位截图.jpg','mime':'image/jpg'}),'image/jpeg')
   self.assertEqual(image_mime({'name':'岗位截图.PNG'}),'image/png')
   self.assertEqual(image_mime({'name':'岗位截图.HEIC'}),'')
+ def test_ocr_image_is_bounded(self):
+  from PIL import Image
+  source=io.BytesIO();Image.new('RGB',(2000,3000),'white').save(source,'PNG')
+  optimized=Image.open(io.BytesIO(optimize_ocr_image(source.getvalue())))
+  self.assertLessEqual(optimized.width*optimized.height,900000)
 
 if __name__=='__main__':unittest.main()
