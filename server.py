@@ -220,6 +220,13 @@ def read_url_reader(url):
 def read_url(url):
  try:return _read_url_direct(url)
  except ValueError:return read_url_reader(url)
+def image_mime(item):
+ mime=str(item.get('mime') or '').lower().strip()
+ if mime=='image/jpg':mime='image/jpeg'
+ if not mime:
+  ext=os.path.splitext(str(item.get('name') or ''))[1].lower()
+  mime={'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp'}.get(ext,'')
+ return mime
 def vision(images):
  """Run fully local OCR for one or more JD screenshots."""
  if not isinstance(images,list) or not 1<=len(images)<=10:raise ValueError('请选择 1～10 张岗位截图。')
@@ -228,7 +235,7 @@ def vision(images):
   from rapidocr import RapidOCR
   ocr=RapidOCR()
   for index,item in enumerate(images,1):
-   mime=item.get('mime','');data=base64.b64decode(item.get('data',''),validate=True)
+   mime=image_mime(item);data=base64.b64decode(item.get('data',''),validate=True)
    if mime not in ('image/png','image/jpeg','image/webp'):raise ValueError('截图支持 PNG、JPG、WEBP。')
    if len(data)>8*1024*1024:raise ValueError('每张截图不得超过 8 MB。')
    total+=len(data)

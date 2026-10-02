@@ -1,7 +1,7 @@
 import os,sys,unittest
 sys.path.insert(0,os.path.dirname(__file__))
 from intelligence import parse_resume,parse_jd,analyze,action_plan
-from server import extract_job_payload,full_analysis
+from server import extract_job_payload,full_analysis,image_mime
 from engine import parse_jd as parse_legacy_jd
 
 RESUME='''张三 产品运营 2021.01-2024.01 某科技公司
@@ -41,5 +41,10 @@ class JobFitTests(unittest.TestCase):
   current=parse_jd(text,'image');legacy=parse_legacy_jd(text,'image');self.assertEqual(current['jobTitle'],'AI产品经理');self.assertEqual(current['company'],'星河科技有限公司');self.assertEqual(legacy['jobTitle'],'AI产品经理');self.assertEqual(legacy['company'],'星河科技有限公司')
  def test_ambiguous_identity_keeps_fallback(self):
   text='''招聘信息\n负责产品需求分析和运营工作\n待遇从优\n期待你的加入''';current=parse_jd(text,'image');legacy=parse_legacy_jd(text,'image');self.assertEqual(current['jobTitle'],'未命名岗位');self.assertEqual(current['company'],'');self.assertEqual(legacy['jobTitle'],'未命名岗位');self.assertEqual(legacy['company'],'')
+ def test_mobile_image_mime_fallback(self):
+  self.assertEqual(image_mime({'name':'岗位截图.JPG','mime':''}),'image/jpeg')
+  self.assertEqual(image_mime({'name':'岗位截图.jpg','mime':'image/jpg'}),'image/jpeg')
+  self.assertEqual(image_mime({'name':'岗位截图.PNG'}),'image/png')
+  self.assertEqual(image_mime({'name':'岗位截图.HEIC'}),'')
 
 if __name__=='__main__':unittest.main()
