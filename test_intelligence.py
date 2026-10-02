@@ -50,6 +50,6 @@ class JobFitTests(unittest.TestCase):
   from PIL import Image
   source=io.BytesIO();Image.new('RGB',(2000,3000),'white').save(source,'PNG')
   optimized=Image.open(io.BytesIO(optimize_ocr_image(source.getvalue())))
-  self.assertLessEqual(optimized.width*optimized.height,900000)
+  self.assertLessEqual(optimized.width*optimized.height,600000)
 
 if __name__=='__main__':unittest.main()

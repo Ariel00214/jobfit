@@ -234,9 +234,9 @@ def ocr_engine():
   with _OCR_LOCK:
    if _OCR is None:
     from rapidocr import RapidOCR
-    _OCR=RapidOCR()
+    _OCR=RapidOCR(params={'Global.use_cls':False,'Global.log_level':'error','EngineConfig.onnxruntime.intra_op_num_threads':1,'EngineConfig.onnxruntime.inter_op_num_threads':1})
  return _OCR
-def optimize_ocr_image(data,max_pixels=900000):
+def optimize_ocr_image(data,max_pixels=600000):
  from PIL import Image,ImageOps
  try:
   image=ImageOps.exif_transpose(Image.open(io.BytesIO(data)))
