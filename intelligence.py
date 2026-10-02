@@ -247,10 +247,9 @@ def match(profile,jd):
   if relevant_caps.intersection(e['capabilities']):related_dates.extend(DATE_RE.findall(e['rawText']))
  readiness={'label':label,'coreCoverage':round(cc*100),'evidenceStrength':round(evidence_strength*100),'constraints':blocking,
   'transferability':sum(x['status']=='transferable' for x in core+important),'majorGaps':[x['capability'] for x in major][:3],'risk':'高' if blocking else '中' if major else '低'}
- can_tailor=cc>=.58 and evidence_strength>=.4 and not blocking and len([x for x in core+important if x['evidence']])>=2
  strengths=[x for x in core+important if x['status'] in ('strong','medium','transferable')][:4]
  return {'matchScore':score,'applicationReadiness':readiness,'relevantWorkYears':profile['totalWorkYears'] if related_dates else None,'requirementAlignment':{'core':core,'important':important,'bonus':bonus},
-  'strengths':strengths,'canTailorResume':can_tailor,'confidence':'High' if len(core+important)>=3 and len(profile['evidence'])>=4 else 'Medium'}
+  'strengths':strengths,'confidence':'High' if len(core+important)>=3 and len(profile['evidence'])>=4 else 'Medium'}
 
 def career_directions(profile,jds=None):
  caps=set(profile['explicitSkills']+profile['hiddenCapabilities']);rows=[]
@@ -326,59 +325,11 @@ def weekly_focus(gaps,jobs):
  if gaps.get('ignore'):out.append(f"{gaps['ignore'][0]['capability']}这周先不用花太多时间。")
  return out[:4]
 
-def professional_rewrite(text):
- """Make a short, recruitment-ready edit without adding facts or ownership."""
- original=(text or '').strip();value=original.strip(' •-—\t')
- for source,target in [('mysql','MySQL'),('excel','Excel'),('prompt','Prompt'),('agent','Agent'),('workflow','Workflow'),('rag','RAG')]:
-  value=re.sub(rf'(?i)(?<![A-Za-z]){source}(?![A-Za-z])',target,value)
- rules=[
-  (r'^ai\s*(?:掌握|能力)?\s*[:：]\s*掌握\s*', 'AI 应用：具备 '),
-  (r'^AI\s*(?:掌握|能力)?\s*[:：]\s*掌握\s*', 'AI 应用：具备 '),
-  (r'(?:掌握|具备)\s*(Prompt[^。；;]*?)(?:的)?基础应用逻辑',r'具备 \1基础应用能力'),
-  (r'可以运用(.{2,40}?)进行(.{2,50}?)(?:，|,)\s*数据导向型',r'使用\1完成\2，支持数据驱动决策'),
-  (r'负责与(.{2,30}?)沟通协调',r'对接\1，推进相关协作'),
-  (r'根据(.{2,30}?)(?:进行)?调整',r'基于\1优化'),
-  (r'负责(.{2,24}?)的统计与分析',r'完成\1统计分析'),
- ]
- for pattern,replacement in rules:value=re.sub(pattern,replacement,value,count=1,flags=re.I)
- value=re.sub(r'\s*([、，：])\s*',r'\1',value)
- value=re.sub(r'[，,]{2,}','，',value).strip()
- if value and value[-1] not in '。！？.!?：:':value+='。'
- return value
-
-def meaningful_edit(original,tailored):
- """Ignore punctuation/case-only changes and edits that may disturb layout."""
- norm=lambda x:re.sub(r'[\s，。；;：:、,.!?！？]','',x or '').lower()
- if norm(original)==norm(tailored):return False
- if not original or not tailored or original.rstrip().endswith(('：',':')):return False
- return len(tailored)<=max(len(original)+18,round(len(original)*1.35))
-
-def tailor_resume(profile,jd):
- facts=profile['resumeFactRegistry'];caps=[x['capability'] for tier in ('core','important') for x in jd['requirementAlignment'][tier] if x['evidence']]
- bullets=[];seen=set();resume_evidence=[e for e in profile['evidence'] if e['source']=='resume']
- # A supplement can only refine a semantically related sentence. Never use an
- # unrelated heading or generic responsibility as a convenient insertion slot.
- for supplement in [e for e in profile['evidence'] if e['source']=='userSupplement' and set(e['capabilities']) & set(caps)]:
-  anchors=[e for e in resume_evidence if set(e['capabilities']) & set(supplement['capabilities']) and e['rawText'] not in seen and not e['rawText'].rstrip().endswith(('：',':'))]
-  if anchors:
-   anchor=max(anchors,key=lambda e:ownership_weight(e['ownership']));tailored=professional_rewrite(supplement['rawText'])
-   if meaningful_edit(anchor['rawText'],tailored):
-    bullets.append({'original':anchor['rawText'],'tailored':tailored,'sourceId':supplement['id'],'ownership':supplement['ownership'],'source':'userSupplement','changeReason':'用你确认的真实补充，精炼一条与该 JD 直接相关的原句。'});seen.add(anchor['rawText'])
- for cap in caps:
-  candidates=[e for e in resume_evidence if cap in e['capabilities']]
-  for e in candidates[:1]:
-   if e['rawText'] not in seen:
-    tailored=professional_rewrite(e['rawText'])
-    if meaningful_edit(e['rawText'],tailored):bullets.append({'original':e['rawText'],'tailored':tailored,'sourceId':e['id'],'ownership':e['ownership'],'source':'resume','changeReason':'针对该 JD 精简措辞；事实、数据与承担程度不变。'})
-    seen.add(e['rawText'])
- return {'targetJob':jd['jobTitle'],'summary':'仅展示与该 JD 直接相关、且有实质改善的精简表达；未列出的原文保持不变。','bullets':bullets[:5],
-  'skills':[x for x in profile['explicitSkills'] if x in caps]+[x for x in profile['explicitSkills'] if x not in caps],
-  'education':facts['education'],'companies':facts['companies'],'roles':facts['roles'],'dates':facts['dates'],'factGuard':{'allowedSourceIds':[x['sourceId'] for x in bullets],'masterResumeUnchanged':True,'layoutPreservedWhenSourceFormatMatches':True}}
-
 def analyze(resume,jds,supplements=None,days=7):
  profile=parse_resume(resume,supplements);jobs=[];groups={}
  for raw in jds:
-  jd=raw if raw.get('jdProfile') else parse_jd(raw.get('jobDescription',''),raw.get('sourceType','text'),raw.get('sourceUrl',''))
+  jd_text=raw.get('jobDescription') or raw.get('rawJD','')
+  jd=raw if 'coreRequirements' in raw else parse_jd(jd_text,raw.get('sourceType') or raw.get('inputType','text'),raw.get('sourceUrl',''))
   item={**jd,**match(profile,jd)};jobs.append(item);groups.setdefault(jd['jobFamily'],[]).append(item)
  families=[]
  for key,items in groups.items():

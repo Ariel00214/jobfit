@@ -5,7 +5,7 @@ from email.parser import BytesParser
 from email.policy import default
 from xml.etree import ElementTree as ET
 from engine import parse_jd,analyze
-from intelligence import analyze as analyze_intelligence,tailor_resume
+from intelligence import analyze as analyze_intelligence
 
 ROOT=os.path.dirname(__file__)
 FALLBACK='该岗位链接暂时无法自动读取；如平台要求登录、验证码或已下架，请上传岗位截图或粘贴 JD 文字。'
@@ -241,86 +241,6 @@ def vision(images):
  if len(content.strip())<30:raise ValueError('截图中没有识别到足够文字，请上传更清晰的截图。')
  return content
 
-def _doc_rows(doc):
- return [doc.get('targetJob','定制简历'),doc.get('summary','')]+[x.get('tailored','') for x in doc.get('bullets',[])]+(['技能：'+'、'.join(doc.get('skills',[]))] if doc.get('skills') else [])+doc.get('education',[])
-def _validated_changes(doc):
- changes=[]
- for item in doc.get('bullets',[]):
-  original=str(item.get('original','')).strip();tailored=str(item.get('tailored','')).strip()
-  if original and tailored and original!=tailored and len(tailored)<=max(320,len(original)*3):changes.append((original,tailored))
- return changes
-def docx_from_master(doc,data):
- """Patch paragraph text in-place while retaining the original DOCX package and styles."""
- src=io.BytesIO(data);out=io.BytesIO();changes=_validated_changes(doc);found=0
- with zipfile.ZipFile(src) as zin,zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as zout:
-  for info in zin.infolist():
-   raw=zin.read(info.filename)
-   if info.filename=='word/document.xml':
-    root=ET.fromstring(raw);ns='{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
-    for paragraph in root.iter(ns+'p'):
-     nodes=list(paragraph.iter(ns+'t'));full=''.join(n.text or '' for n in nodes)
-     for original,tailored in changes:
-      if original in full:
-       updated=full.replace(original,tailored,1)
-       # Keep the paragraph's existing runs and their fonts/size/emphasis. Text is
-       # redistributed across the same run nodes instead of collapsing formatting.
-       cursor=0
-       for index,node in enumerate(nodes):
-        old_len=len(node.text or '')
-        node.text=updated[cursor:] if index==len(nodes)-1 else updated[cursor:cursor+old_len]
-        cursor+=old_len
-       full=updated;found+=1;break
-    raw=ET.tostring(root,encoding='utf-8',xml_declaration=True)
-   zout.writestr(info,raw)
- if changes and not found:raise ValueError('没有在原 DOCX 中定位到可安全替换的句子，请检查原文是否被手动改动。')
- return out.getvalue()
-def pdf_from_master(doc,data):
- """Replace matched text boxes on the original PDF without changing page count or size."""
- import pymupdf
- pdf=pymupdf.open(stream=data,filetype='pdf');changes=_validated_changes(doc);found=0
- for page in pdf:
-  replacements=[]
-  for original,tailored in changes:
-   needles=[original,original.rstrip('。；;.!?')]
-   rects=[]
-   for needle in needles:
-    if len(needle)>=4:rects=page.search_for(needle)
-    if rects:break
-   for rect in rects[:1]:
-    page.add_redact_annot(rect,fill=(1,1,1));replacements.append((rect,tailored));found+=1
-  if replacements:
-   page.apply_redactions()
-   for rect,tailored in replacements:
-    box=pymupdf.Rect(rect.x0,rect.y0,rect.x1,max(rect.y1,rect.y0+rect.height*2.4));size=max(6,min(11,rect.height*.72))
-    while size>=6 and page.insert_textbox(box,tailored,fontname='china-s',fontsize=size,color=(0,0,0),overlay=True)<0:size-=.5
- if changes and not found:pdf.close();raise ValueError('没有在原 PDF 中定位到可安全替换的句子，请改用原 DOCX 或恢复系统建议后重试。')
- out=pdf.tobytes(garbage=4,deflate=True);pdf.close();return out
-def docx_bytes(doc):
- rows=_doc_rows(doc);paras=''.join(f'<w:p><w:r><w:t xml:space="preserve">{html.escape(str(x),quote=False)}</w:t></w:r></w:p>' for x in rows if x)
- document=f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{paras}<w:sectPr/></w:body></w:document>'
- types='<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
- rels='<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
- out=io.BytesIO()
- with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:z.writestr('[Content_Types].xml',types);z.writestr('_rels/.rels',rels);z.writestr('word/document.xml',document)
- return out.getvalue()
-def pdf_bytes(doc):
- rows=[]
- for value in _doc_rows(doc):
-  value=str(value)
-  while len(value)>46:rows.append(value[:46]);value=value[46:]
-  if value:rows.append(value)
- pages=[rows[i:i+34] for i in range(0,len(rows),34)] or [[]];objs=[None,None,None];page_ids=[];content_ids=[];next_id=4
- for _ in pages:page_ids.append(next_id);content_ids.append(next_id+1);next_id+=2
- font_id=next_id;objs[0]='<< /Type /Catalog /Pages 2 0 R >>';objs[1]=f'<< /Type /Pages /Kids [{" ".join(str(x)+" 0 R" for x in page_ids)}] /Count {len(page_ids)} >>';objs[2]=''
- for i,page in enumerate(pages):
-  stream='BT /F1 12 Tf 54 790 Td 18 TL '+''.join(f'<FEFF{x.encode("utf-16-be").hex().upper()}> Tj T* ' for x in page)+'ET';objs.extend([f'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {content_ids[i]} 0 R >>',f'<< /Length {len(stream.encode())} >>\nstream\n{stream}\nendstream'])
- objs.append('<< /Type /Font /Subtype /Type0 /BaseFont /STSong-Light /Encoding /UniGB-UCS2-H /DescendantFonts [<< /Type /Font /Subtype /CIDFontType0 /BaseFont /STSong-Light /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 4 >> >>] >>')
- raw=bytearray(b'%PDF-1.4\n');offsets=[0]
- for i,obj in enumerate(objs,1):offsets.append(len(raw));raw.extend(f'{i} 0 obj\n{obj}\nendobj\n'.encode())
- xref=len(raw);raw.extend(f'xref\n0 {len(objs)+1}\n0000000000 65535 f \n'.encode())
- for off in offsets[1:]:raw.extend(f'{off:010d} 00000 n \n'.encode())
- raw.extend(f'trailer << /Size {len(objs)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF'.encode());return bytes(raw)
-
 def full_analysis(resume,jds,supplements=None,days=7):
  legacy=analyze(resume,jds);intel=analyze_intelligence(resume,jds,supplements or [],days)
  advanced_jobs={j.get('jobDescription',''):j for f in intel['families'] for j in f['jobs']}
@@ -343,8 +263,6 @@ def full_analysis(resume,jds,supplements=None,days=7):
 class Handler(BaseHTTPRequestHandler):
  def send(self,status,obj):
   raw=json.dumps(obj,ensure_ascii=False).encode();self.send_response(status);self.send_header('Content-Type','application/json; charset=utf-8');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
- def send_binary(self,status,raw,mime,name):
-  self.send_response(status);self.send_header('Content-Type',mime);self.send_header('Content-Length',str(len(raw)));self.send_header('Content-Disposition',f'attachment; filename="{name}"');self.end_headers();self.wfile.write(raw)
  def do_GET(self):
   path=self.path.split('?')[0]
   if path=='/api/health':return self.send(200,{'status':'ok'})
@@ -382,19 +300,6 @@ class Handler(BaseHTTPRequestHandler):
     if len(resume.strip())<40:raise ValueError('请先上传简历。')
     if not 1<=len(jds)<=10:raise ValueError('请添加 1～10 个岗位 JD。')
     return self.send(200,full_analysis(resume,jds,body.get('supplements',[]),body.get('days',7)))
-   if self.path=='/api/tailor':
-    resume=body.get('resume','');jd=body.get('jd',{});result=analyze_intelligence(resume,[jd],body.get('supplements',[]));job=result['families'][0]['jobs'][0]
-    if not job['canTailorResume']:raise ValueError('当前真实证据还不足以生成这份岗位定制简历。')
-    tailored=tailor_resume(result['profile'],job);tailored['masterSource']={'name':body.get('masterName',''),'data':body.get('masterData','')}
-    return self.send(200,{'resume':tailored})
-   if self.path in ('/api/export/pdf','/api/export/docx'):
-    doc=body.get('resume',{});kind=self.path.rsplit('/',1)[1]
-    source=doc.get('masterSource') or {};name=source.get('name','').lower();data=base64.b64decode(source.get('data','')) if source.get('data') else b''
-    if kind=='pdf' and name.endswith('.pdf') and data:raw=pdf_from_master(doc,data)
-    elif kind=='docx' and name.endswith('.docx') and data:raw=docx_from_master(doc,data)
-    else:raw=pdf_bytes(doc) if kind=='pdf' else docx_bytes(doc)
-    mime='application/pdf' if kind=='pdf' else 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-    return self.send_binary(200,raw,mime,f'JobFit-tailored.{kind}')
    return self.send(404,{'error':'Not found'})
   except ValueError as e:return self.send(400,{'error':str(e)})
   except Exception as e:return self.send(500,{'error':'处理失败，请检查文件或重试。'})

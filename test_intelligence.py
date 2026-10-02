@@ -1,7 +1,7 @@
-import io,os,sys,unittest,zipfile
+import os,sys,unittest
 sys.path.insert(0,os.path.dirname(__file__))
-from intelligence import parse_resume,parse_jd,analyze,match,action_plan,tailor_resume,professional_rewrite,meaningful_edit
-from server import docx_bytes,pdf_bytes,docx_from_master,pdf_from_master,extract_job_payload,full_analysis
+from intelligence import parse_resume,parse_jd,analyze,action_plan
+from server import extract_job_payload,full_analysis
 from engine import parse_jd as parse_legacy_jd
 
 RESUME='''张三 产品运营 2021.01-2024.01 某科技公司
@@ -31,50 +31,15 @@ class JobFitTests(unittest.TestCase):
  def test_plans_are_depth_based(self):
   gaps={'key':[{'capability':'产品落地'}]};p3=action_plan(gaps,3);p7=action_plan(gaps,7);p30=action_plan(gaps,30);self.assertNotEqual(p3['depth'],p7['depth']);self.assertNotEqual(p7['depth'],p30['depth']);self.assertIn('真实试用',p30['depth'])
  def test_supplement_recomputes_without_master_change(self):
-  before=analyze(RESUME,[self.jds[2]]);supp=[{'rawText':'独立负责一个 AI 助手需求分析和原型，组织测试并完成上线。','relatedCapability':'产品需求分析','ownership':'own','reusable':True}];after=analyze(RESUME,[self.jds[2]],supp);self.assertGreaterEqual(after['families'][0]['jobs'][0]['matchScore'],before['families'][0]['jobs'][0]['matchScore']);self.assertEqual(after['profile']['resumeFactRegistry'],parse_resume(RESUME)['resumeFactRegistry'])
-  before_job=before['families'][0]['jobs'][0];after_job=after['families'][0]['jobs'][0]
-  self.assertGreater(after_job['matchScore'],before_job['matchScore'])
-  self.assertNotEqual(after_job['applicationReadiness']['label'],before_job['applicationReadiness']['label'])
-  tailored=tailor_resume(after['profile'],after_job)
-  self.assertTrue(any(x['source']=='userSupplement' and 'AI 助手' in x['tailored'] for x in tailored['bullets']))
-  visible=full_analysis(RESUME,[parse_legacy_jd(JDS[2])],supp);visible_job=visible['families'][0]['jobs'][0]
-  self.assertEqual(visible_job['matchScore'],visible_job['evidenceMatch']['matchScore'])
- def test_fact_safe_tailor_and_exports(self):
-  r=analyze(RESUME,[self.jds[1]]);job=r['families'][0]['jobs'][0];doc=tailor_resume(r['profile'],job);all_text=' '.join(x['tailored'] for x in doc['bullets']);self.assertNotIn('SQL',all_text);self.assertTrue(pdf_bytes(doc).startswith(b'%PDF'));z=zipfile.ZipFile(io.BytesIO(docx_bytes(doc)));self.assertIn('word/document.xml',z.namelist())
- def test_tailor_only_shows_material_professional_edits(self):
-  ai='ai掌握：掌握 Prompt 设计及 Agent、Workflow、RAG 的基础应用逻辑'
-  edited=professional_rewrite(ai)
-  self.assertEqual(edited,'AI 应用：具备 Prompt 设计及 Agent、Workflow、RAG 基础应用能力。')
-  self.assertTrue(meaningful_edit(ai,edited))
-  self.assertFalse(meaningful_edit('新闻宣传：完成新闻稿撰写','新闻宣传：完成新闻稿撰写。'))
- def test_supplement_never_replaces_unrelated_heading(self):
-  resume='''李四 用户运营\n社群运营与用户增长：\n负责社群活动策划与用户维护，提升用户活跃。'''
-  jd=parse_jd('''职位名称：数据分析师\n核心职责：负责数据统计和业务决策。\n要求：熟练使用 Excel 和 MySQL。''')
-  supp=[{'rawText':'可以运用 Excel 和 MySQL 进行数据统计与决策，数据导向型。','relatedCapability':'数据驱动决策','ownership':'execute','reusable':True}]
-  result=analyze(resume,[jd],supp);doc=tailor_resume(result['profile'],result['families'][0]['jobs'][0])
-  self.assertFalse(any(x['original'].startswith('社群运营与用户增长') for x in doc['bullets']))
+  before=analyze(RESUME,[self.jds[2]]);supp=[{'rawText':'独立负责一个 AI 助手需求分析和原型，组织测试并完成上线。','relatedCapability':'产品需求分析','ownership':'own','reusable':True}];after=analyze(RESUME,[self.jds[2]],supp)
+  self.assertGreater(after['families'][0]['jobs'][0]['matchScore'],before['families'][0]['jobs'][0]['matchScore']);self.assertEqual(after['profile']['resumeFactRegistry'],parse_resume(RESUME)['resumeFactRegistry'])
+  visible=full_analysis(RESUME,[parse_legacy_jd(JDS[2])],supp);visible_job=visible['families'][0]['jobs'][0];self.assertEqual(visible_job['matchScore'],visible_job['evidenceMatch']['matchScore'])
  def test_link_payload_and_ocr_identity(self):
   html='''<title>AI产品经理招聘_星河科技</title><script>{"jobName":"AI产品经理","companyName":"星河科技有限公司","jobDescription":"负责用户研究、需求分析与产品上线，要求三年以上产品经验"}</script>'''
   payload=extract_job_payload(html);self.assertIn('AI产品经理',payload);self.assertIn('星河科技有限公司',payload)
-  jd=parse_jd('''【截图 1】\n星河科技有限公司\nAI产品经理\n负责用户研究、需求分析与产品上线\n任职要求：三年以上产品经验''','image')
-  self.assertEqual(jd['jobTitle'],'AI产品经理');self.assertEqual(jd['company'],'星河科技有限公司')
-  legacy=parse_legacy_jd('''【截图 1】\n星河科技有限公司\nAI产品经理\n负责用户研究、需求分析与产品上线\n任职要求：三年以上产品经验''','image')
-  self.assertEqual(legacy['jobTitle'],'AI产品经理');self.assertEqual(legacy['company'],'星河科技有限公司')
+  text='''【截图 1】\n星河科技有限公司\nAI产品经理\n负责用户研究、需求分析与产品上线\n任职要求：三年以上产品经验'''
+  current=parse_jd(text,'image');legacy=parse_legacy_jd(text,'image');self.assertEqual(current['jobTitle'],'AI产品经理');self.assertEqual(current['company'],'星河科技有限公司');self.assertEqual(legacy['jobTitle'],'AI产品经理');self.assertEqual(legacy['company'],'星河科技有限公司')
  def test_ambiguous_identity_keeps_fallback(self):
-  text='''招聘信息\n负责产品需求分析和运营工作\n待遇从优\n期待你的加入'''
-  current=parse_jd(text,'image');legacy=parse_legacy_jd(text,'image')
-  self.assertEqual(current['jobTitle'],'未命名岗位');self.assertEqual(current['company'],'')
-  self.assertEqual(legacy['jobTitle'],'未命名岗位');self.assertEqual(legacy['company'],'')
- def test_same_format_exports_keep_master_structure(self):
-  master_doc={'targetJob':'Master','summary':'','bullets':[{'tailored':'Original evidence sentence'}]}
-  master=docx_bytes(master_doc);change={'bullets':[{'original':'Original evidence sentence','tailored':'Refined evidence sentence'}]}
-  patched=docx_from_master(change,master)
-  with zipfile.ZipFile(io.BytesIO(master)) as before,zipfile.ZipFile(io.BytesIO(patched)) as after:
-   before_xml=before.read('word/document.xml').decode();self.assertEqual(before.namelist(),after.namelist());xml=after.read('word/document.xml').decode()
-   self.assertIn('Refined evidence sentence',xml);self.assertEqual(xml.count('sectPr'),before_xml.count('sectPr'))
-  import pymupdf
-  source=pymupdf.open();page=source.new_page(width=612,height=792);page.insert_text((72,100),'Original evidence sentence',fontsize=11);master_pdf=source.tobytes();source.close()
-  changed_pdf=pdf_from_master(change,master_pdf);result=pymupdf.open(stream=changed_pdf,filetype='pdf')
-  self.assertEqual(result.page_count,1);self.assertEqual(tuple(result[0].rect),(0.0,0.0,612.0,792.0));result.close()
+  text='''招聘信息\n负责产品需求分析和运营工作\n待遇从优\n期待你的加入''';current=parse_jd(text,'image');legacy=parse_legacy_jd(text,'image');self.assertEqual(current['jobTitle'],'未命名岗位');self.assertEqual(current['company'],'');self.assertEqual(legacy['jobTitle'],'未命名岗位');self.assertEqual(legacy['company'],'')
 
 if __name__=='__main__':unittest.main()
