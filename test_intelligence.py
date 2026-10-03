@@ -1,7 +1,7 @@
 import os,sys,unittest,io
 sys.path.insert(0,os.path.dirname(__file__))
 from intelligence import parse_resume,parse_jd,analyze,action_plan
-from server import extract_job_payload,full_analysis,image_mime,optimize_ocr_image
+from server import extract_job_payload,full_analysis,image_mime,optimize_ocr_image,merge_adjacent_ocr
 from engine import parse_jd as parse_legacy_jd
 
 RESUME='''张三 产品运营 2021.01-2024.01 某科技公司
@@ -46,10 +46,21 @@ class JobFitTests(unittest.TestCase):
   self.assertEqual(image_mime({'name':'岗位截图.jpg','mime':'image/jpg'}),'image/jpeg')
   self.assertEqual(image_mime({'name':'岗位截图.PNG'}),'image/png')
   self.assertEqual(image_mime({'name':'岗位截图.HEIC'}),'')
- def test_ocr_image_is_bounded(self):
+ def test_ocr_image_preserves_text_resolution(self):
   from PIL import Image
   source=io.BytesIO();Image.new('RGB',(2000,3000),'white').save(source,'PNG')
-  optimized=Image.open(io.BytesIO(optimize_ocr_image(source.getvalue())))
-  self.assertLessEqual(optimized.width*optimized.height,600000)
+  optimized=optimize_ocr_image(source.getvalue())
+  self.assertEqual(optimized.shape[:2],(3000,2000))
+  wide=io.BytesIO();Image.new('RGB',(3000,4500),'white').save(wide,'JPEG')
+  bounded=optimize_ocr_image(wide.getvalue())
+  self.assertEqual(bounded.shape[:2],(3000,2000))
+ def test_slice_overlap_dedup_is_boundary_only(self):
+  previous='负责 AI 产品设计\n参与需求分析\n完成产品上线'
+  current='参与需求分析\n完成产品上线\n负责数据复盘'
+  merged=merge_adjacent_ocr(previous,current)
+  self.assertEqual(merged.count('参与需求分析'),1)
+  self.assertEqual(merged.count('完成产品上线'),1)
+  self.assertTrue(merged.endswith('负责数据复盘'))
+  self.assertEqual(merge_adjacent_ocr('沟通能力\n其他内容','沟通能力\n团队合作').count('沟通能力'),2)
 
 if __name__=='__main__':unittest.main()

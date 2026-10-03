@@ -1,4 +1,4 @@
-import os,json,re,zipfile,io,html,ipaddress,socket,urllib.request,urllib.parse,urllib.error,base64,uuid,threading
+import os,json,re,zipfile,io,html,ipaddress,socket,urllib.request,urllib.parse,urllib.error,base64,uuid,threading,time
 from html.parser import HTMLParser
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
 from email.parser import BytesParser
@@ -236,36 +236,57 @@ def ocr_engine():
     from rapidocr import RapidOCR
     _OCR=RapidOCR(params={'Global.use_cls':False,'Global.log_level':'error','EngineConfig.onnxruntime.intra_op_num_threads':1,'EngineConfig.onnxruntime.inter_op_num_threads':1})
  return _OCR
-def optimize_ocr_image(data,max_pixels=600000):
+def optimize_ocr_image(data):
+ """Decode and normalize an OCR part without another lossy JPEG round-trip."""
  from PIL import Image,ImageOps
+ import numpy as np
  try:
   image=ImageOps.exif_transpose(Image.open(io.BytesIO(data)))
-  if image.width*image.height>40000000:raise ValueError('截图像素过大，请先裁剪后上传。')
-  scale=min(1,(max_pixels/max(1,image.width*image.height))**.5)
-  if scale<1:image=image.resize((max(1,int(image.width*scale)),max(1,int(image.height*scale))),Image.Resampling.LANCZOS)
-  image=image.convert('RGB');stream=io.BytesIO();image.save(stream,'JPEG',quality=88,optimize=True)
-  return stream.getvalue()
+  if image.width*image.height>80000000:raise ValueError('截图像素过大，请先裁剪后上传。')
+  if image.width>2000:
+   scale=2000/image.width;image=image.resize((2000,max(1,round(image.height*scale))),Image.Resampling.LANCZOS)
+  return np.asarray(image.convert('RGB'))
  except ValueError:raise
  except Exception as exc:raise ValueError('图片格式无法读取，请改用清晰的 JPG 或 PNG 截图。') from exc
+def merge_adjacent_ocr(previous,current):
+ """Remove only exact line overlap at adjacent slice boundaries."""
+ left=[x.strip() for x in previous.splitlines() if x.strip()]
+ right=[x.strip() for x in current.splitlines() if x.strip()]
+ normal=lambda value:re.sub(r'[\s，。；：、,.!?！？;:\-]+','',value).lower()
+ overlap=0
+ for size in range(min(12,len(left),len(right)),0,-1):
+  if [normal(x) for x in left[-size:]]==[normal(x) for x in right[:size]]:
+   overlap=size;break
+ return '\n'.join(left+right[overlap:])
 def vision(images):
- """Run fully local OCR for one or more JD screenshots."""
- if not isinstance(images,list) or not 1<=len(images)<=10:raise ValueError('请选择 1～10 张岗位截图。')
- total=0;parts=[]
+ """Run fully local OCR for ordered slices from one to ten JD screenshots."""
+ if not isinstance(images,list) or not 1<=len(images)<=60:raise ValueError('请选择 1～10 张岗位截图。')
+ started=time.perf_counter();decode_ms=prepare_ms=run_ms=0;total=0;grouped={}
  try:
   ocr=ocr_engine()
-  for index,item in enumerate(images,1):
-   mime=image_mime(item);data=base64.b64decode(item.get('data',''),validate=True)
+  ordered=sorted(enumerate(images),key=lambda pair:(int(pair[1].get('imageIndex',pair[0])),int(pair[1].get('partIndex',0))))
+  image_indexes={int(item.get('imageIndex',position)) for position,item in enumerate(images)}
+  if len(image_indexes)>10:raise ValueError('请选择 1～10 张岗位截图。')
+  for fallback_index,item in ordered:
+   image_index=int(item.get('imageIndex',fallback_index));mime=image_mime(item);tick=time.perf_counter()
+   try:data=base64.b64decode(item.get('data',''),validate=True)
+   except Exception as exc:raise ValueError('图片数据损坏，请重新选择截图。') from exc
+   decode_ms+=(time.perf_counter()-tick)*1000
    if mime not in ('image/png','image/jpeg','image/webp'):raise ValueError('截图支持 PNG、JPG、WEBP。')
-   if len(data)>8*1024*1024:raise ValueError('每张截图不得超过 8 MB。')
+   if len(data)>12*1024*1024:raise ValueError('单个图片分片不得超过 12 MB。')
    total+=len(data)
-   if total>24*1024*1024:raise ValueError('全部截图合计不得超过 24 MB。')
-   optimized=optimize_ocr_image(data)
-   with _OCR_RUN_LOCK:text='\n'.join(_ocr_lines(ocr(optimized))).strip()
-   if text:parts.append('【截图 '+str(index)+'】\n'+text)
+   if total>32*1024*1024:raise ValueError('全部截图合计不得超过 32 MB。')
+   tick=time.perf_counter();prepared=optimize_ocr_image(data);prepare_ms+=(time.perf_counter()-tick)*1000
+   tick=time.perf_counter()
+   with _OCR_RUN_LOCK:text='\n'.join(_ocr_lines(ocr(prepared))).strip()
+   run_ms+=(time.perf_counter()-tick)*1000
+   if text:grouped[image_index]=merge_adjacent_ocr(grouped.get(image_index,''),text)
  except ValueError:raise
- except Exception as exc:raise ValueError('本地 OCR 识别失败，请确认截图清晰完整。') from exc
- content='\n\n'.join(parts)
- if len(content.strip())<30:raise ValueError('截图中没有识别到足够文字，请上传更清晰的截图。')
+ except Exception as exc:raise ValueError('本地 OCR 处理失败，请稍后重试或上传更清晰的截图。') from exc
+ content='\n\n'.join('【截图 '+str(index+1)+'】\n'+grouped[index] for index in sorted(grouped))
+ total_ms=(time.perf_counter()-started)*1000
+ print(f'[OCR] images={len(image_indexes)} parts={len(images)} decode={decode_ms:.0f}ms prepare={prepare_ms:.0f}ms run={run_ms:.0f}ms total={total_ms:.0f}ms',flush=True)
+ if len(re.sub(r'\s+','',content))<30:raise ValueError('这张截图没有识别到足够的 JD 文字，请尝试上传更清晰的截图。')
  return content
 
 def full_analysis(resume,jds,supplements=None,days=7):
@@ -301,7 +322,7 @@ class Handler(BaseHTTPRequestHandler):
  def do_POST(self):
   try:
    length=int(self.headers.get('Content-Length','0'))
-   if length>36*1024*1024:raise ValueError('上传内容过大。')
+   if length>45*1024*1024:raise ValueError('上传内容过大。')
    body=json.loads(self.rfile.read(length))
    if self.path=='/api/parse-resume':
     data=base64.b64decode(body['data']);text=read_file(body['name'],data)
@@ -320,7 +341,11 @@ class Handler(BaseHTTPRequestHandler):
     else:raise ValueError('请选择 JD 输入方式。')
     if len(content.strip())<35:raise ValueError('JD 内容不足，请补充岗位职责和任职要求。')
     jd_id=body.get('jdId') or uuid.uuid4().hex
-    metadata={'jdId':jd_id,'sourceUrl':source_url,'sourcePlatform':platform_for(source_url) or ('岗位截图' if source=='image' else '手动 JD'),'sourceImage':[x.get('name','截图') for x in body.get('images',[])]}
+    source_names=[]
+    for image in body.get('images',[]):
+     name=image.get('originalName') or image.get('name','截图')
+     if name not in source_names:source_names.append(name)
+    metadata={'jdId':jd_id,'sourceUrl':source_url,'sourcePlatform':platform_for(source_url) or ('岗位截图' if source=='image' else '手动 JD'),'sourceImage':source_names}
     return self.send(200,{'jd':parse_jd(content,source,source_url,metadata)})
    if self.path=='/api/analyze':
     resume=body.get('resume','');jds=body.get('jds',[])
