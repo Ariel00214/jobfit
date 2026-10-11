@@ -1,62 +1,16 @@
-import os,json,re,zipfile,io,html,ipaddress,socket,urllib.request,urllib.parse,urllib.error,base64,uuid,threading,time
-from html.parser import HTMLParser
+import os,json,re,zipfile,io,base64,uuid,threading,time
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
 from email.parser import BytesParser
 from email.policy import default
 from xml.etree import ElementTree as ET
 from engine import parse_jd,analyze
 from intelligence import analyze as analyze_intelligence
+from job_links import read_job, platform_for, normalize_url
 
 ROOT=os.path.dirname(__file__)
 _OCR=None
 _OCR_LOCK=threading.Lock()
 _OCR_RUN_LOCK=threading.Lock()
-FALLBACK='该岗位链接暂时无法自动读取；如平台要求登录、验证码或已下架，请上传岗位截图或粘贴 JD 文字。'
-JOB_PLATFORMS={
- 'zhipin.com':'BOSS直聘','liepin.com':'猎聘','zhaopin.com':'智联招聘',
- '51job.com':'前程无忧','lagou.com':'拉勾','kanzhun.com':'看准',
-}
-def platform_for(url):
- host=urllib.parse.urlparse(url or '').hostname or ''
- return next((name for domain,name in JOB_PLATFORMS.items() if host==domain or host.endswith('.'+domain)),'招聘平台' if url else '')
-class HTMLText(HTMLParser):
- def __init__(self):super().__init__();self.parts=[];self.skip=0
- def handle_starttag(self,tag,attrs):
-  if tag in ('script','style','nav','footer','header'):self.skip+=1
-  if tag in ('p','div','li','h1','h2','h3','br'):self.parts.append('\n')
- def handle_endtag(self,tag):
-  if tag in ('script','style','nav','footer','header'):self.skip=max(0,self.skip-1)
- def handle_data(self,data):
-  if not self.skip:self.parts.append(data)
-def extract_job_payload(source):
- """Recover visible job fields stored in SSR/JSON blobs used by job platforms."""
- if not source:return ''
- parts=[]
- title=re.search(r'<title[^>]*>(.*?)</title>',source,re.I|re.S)
- if title:
-  value=html.unescape(re.sub('<[^>]+>',' ',title.group(1))).strip()
-  if value:parts.append('页面标题：'+value[:160])
- keys={
-  '职位名称':('jobName','jobTitle','positionName','positionTitle','postName'),
-  '公司名称':('companyName','brandName','companyShortName','corpName'),
-  '工作地点':('cityName','workCity','jobArea','areaName','businessDistrict'),
-  '岗位内容':('jobDescription','description','postDescription','jobDetail','positionDescription','jobSecText'),
- }
- for label,names in keys.items():
-  values=[]
-  for name in names:
-   pattern=r'["\']'+re.escape(name)+r'["\']\s*:\s*["\']((?:\\.|[^"\']){2,12000})["\']'
-   for match in re.finditer(pattern,source,re.I):
-    raw=match.group(1)
-    try:value=json.loads('"'+raw.replace('"','\\"').replace('\\"','"')+'"')
-    except Exception:
-     try:value=bytes(raw,'utf-8').decode('unicode_escape')
-     except Exception:value=raw
-    value=html.unescape(re.sub(r'<[^>]+>','\n',str(value)))
-    value=re.sub(r'\\[nrt]|[\r\t]+','\n',value);value=re.sub(r'\n\s*\n+','\n',value).strip()
-    if value and value not in values:values.append(value)
-  if values:parts.append(label+'：'+values[0][:12000])
- return '\n'.join(parts)
 def read_file(name,data):
  name=name.lower()
  if len(data)>8*1024*1024:raise ValueError('文件不得超过 8 MB。')
@@ -106,121 +60,6 @@ def read_pdf(data):
    if text:pages.append(text)
  finally:doc.close()
  return '\n\n'.join(pages)
-def safe_url(url):
- u=urllib.parse.urlparse(url)
- if u.scheme not in ('http','https') or not u.hostname or u.username or u.password:raise ValueError(FALLBACK)
- for a in socket.getaddrinfo(u.hostname,None,type=socket.SOCK_STREAM):
-  if not ipaddress.ip_address(a[4][0]).is_global:raise ValueError(FALLBACK)
- return url
-class SafeRedirect(urllib.request.HTTPRedirectHandler):
- def redirect_request(self,req,fp,code,msg,headers,newurl):safe_url(newurl);return super().redirect_request(req,fp,code,msg,headers,newurl)
-def read_url_browser(url):
- """Render JavaScript-heavy public job pages in a local headless browser."""
- os.environ.setdefault('PLAYWRIGHT_BROWSERS_PATH',os.path.join(ROOT,'.playwright'))
- from playwright.sync_api import sync_playwright
- checked={}
- def route_request(route):
-  target=route.request.url
-  try:
-   parsed=urllib.parse.urlparse(target)
-   if parsed.scheme not in ('http','https'):return route.abort()
-   host=parsed.hostname or ''
-   if host not in checked:checked[host]=bool(safe_url(target))
-   return route.continue_()
-  except Exception:return route.abort()
- with sync_playwright() as p:
-  browser=p.chromium.launch(headless=True)
-  context=browser.new_context(locale='zh-CN',user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36')
-  page=context.new_page();page.route('**/*',route_request)
-  try:
-   page.goto(url,wait_until='domcontentloaded',timeout=20000)
-   page.wait_for_timeout(2500)
-   safe_url(page.url)
-   return page.content()
-  finally:browser.close()
-def _read_url_direct(url):
- try:
-  import requests
-  current=safe_url(url);response=None
-  headers={
-   'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36',
-   'Accept':'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8',
-   'Accept-Language':'zh-CN,zh;q=0.9,en;q=0.5','Referer':'https://www.baidu.com/',
-  }
-  # Follow redirects ourselves so every destination still passes the SSRF check.
-  for _ in range(6):
-   response=requests.get(current,headers=headers,timeout=(5,12),allow_redirects=False,stream=True)
-   if response.is_redirect or response.is_permanent_redirect:
-    current=safe_url(urllib.parse.urljoin(current,response.headers.get('Location','')));response.close();continue
-   break
-  if response is None or response.status_code!=200:raise ValueError(FALLBACK)
-  if 'text/html' not in response.headers.get('Content-Type',''):raise ValueError(FALLBACK)
-  raw=response.raw.read(2*1024*1024+1,decode_content=True);response.close()
-  if len(raw)>2*1024*1024:raise ValueError(FALLBACK)
-  response.encoding=response.encoding or response.apparent_encoding or 'utf-8'
-  source=raw.decode(response.encoding,errors='replace')
-  structured=[]
-  for block in re.findall(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',source,re.I|re.S):
-   try:
-    obj=json.loads(html.unescape(block));nodes=obj if isinstance(obj,list) else [obj]
-    for node in nodes:
-     if isinstance(node,dict) and (node.get('@type')=='JobPosting' or 'job' in str(node.get('@type','')).lower()):
-      title=node.get('title','');company=(node.get('hiringOrganization') or {}).get('name','') if isinstance(node.get('hiringOrganization'),dict) else ''
-      location=node.get('jobLocation','');location=json.dumps(location,ensure_ascii=False) if not isinstance(location,str) else location
-      description=html.unescape(re.sub('<[^>]+>','\n',str(node.get('description',''))))
-      structured.extend([f'职位名称：{title}' if title else '',f'公司名称：{company}' if company else '',f'工作地点：{location}' if location else '',description])
-   except Exception:pass
-  structured_text=extract_job_payload(source);parser=HTMLText();parser.feed(source)
-  text=html.unescape(''.join(parser.parts))
-  text=re.sub(r'[ \t\u00a0]+',' ',text);text=re.sub(r'\n\s*\n+','\n',text).strip()
-  if any(structured):text='\n'.join(x for x in structured if x)+'\n'+text
-  if structured_text:text=structured_text+'\n'+text
-  blocked=re.search(r'安全验证|访问验证|滑动验证|验证码|Security Verification|请登录后',text,re.I)
-  has_job_terms=re.search(r'职位(?:描述|介绍|要求)|岗位(?:职责|要求)|任职要求|工作职责|responsibilit|requirement',text,re.I)
-  if blocked or len(text)<100 or not has_job_terms:
-   source=read_url_browser(current)
-   structured_text=extract_job_payload(source);parser=HTMLText();parser.feed(source)
-   text=html.unescape(''.join(parser.parts))
-   text=re.sub(r'[ \t\u00a0]+',' ',text);text=re.sub(r'\n\s*\n+','\n',text).strip()
-   if structured_text:text=structured_text+'\n'+text
-   blocked=re.search(r'安全验证|访问验证|滑动验证|验证码|Security Verification|请登录后',text,re.I)
-   has_job_terms=re.search(r'职位(?:描述|介绍|要求)|岗位(?:职责|要求)|任职要求|工作职责|responsibilit|requirement',text,re.I)
-   if blocked or len(text)<100 or not has_job_terms:raise ValueError(FALLBACK)
-  platform=platform_for(current)
-  # Popular Chinese job pages encode useful identity fields in their document title.
-  prefix=[]
-  title_match=re.search(r'【(?:[^【】\s]+\s+)?(.+?)招聘】',text[:500])
-  if title_match:prefix.append('职位名称：'+title_match.group(1).strip())
-  company_match=re.search(r'】[-_－—]([^\n_-]{2,50}?)(?:招聘信息)?[-_－—]',text[:500])
-  if company_match:prefix.append('公司名称：'+company_match.group(1).strip())
-  prefix.append('来源平台：'+platform)
-  return ('\n'.join(prefix)+'\n'+text)[:30000]
- except ValueError:raise
- except Exception as exc:raise ValueError(FALLBACK) from exc
-def read_url_reader(url):
- """Last-resort reader for a public job URL; never sends resume or user profile data."""
- import requests
- original=urllib.parse.urlparse(url);host=(original.hostname or '').lower()
- if original.scheme not in ('http','https') or not any(host==d or host.endswith('.'+d) for d in JOB_PLATFORMS):raise ValueError(FALLBACK)
- reader='https://r.jina.ai/http://'+original.netloc+original.path
- if original.query:reader+='?'+original.query
- try:
-  response=requests.get(reader,headers={'Accept':'text/plain','User-Agent':'JobFit/3.0'},timeout=(5,25))
-  if response.status_code!=200:raise ValueError(FALLBACK)
-  response.encoding='utf-8';text=response.text.strip();prefix=[]
-  title_line=re.search(r'^Title:\s*(.+)$',text,re.M)
-  if title_line:
-   page_title=title_line.group(1).strip();prefix.append('页面标题：'+page_title)
-   company_match=re.search(r'_([^_\-—|]{2,60}?)招聘(?:信息)?(?:\s*[-—|]|$)',page_title)
-   if company_match:prefix.append('公司名称：'+company_match.group(1).strip())
-  if prefix:text='\n'.join(prefix)+'\n'+text
-  if len(text)<100 or not re.search(r'职位描述|职位介绍|岗位职责|任职要求|工作职责|responsibilit|requirement',text,re.I):raise ValueError(FALLBACK)
-  return text[:30000]
- except ValueError:raise
- except Exception as exc:raise ValueError(FALLBACK) from exc
-def read_url(url):
- try:return _read_url_direct(url)
- except ValueError:return read_url_reader(url)
 def image_mime(item):
  mime=str(item.get('mime') or '').lower().strip()
  if mime=='image/jpg':mime='image/jpeg'
@@ -310,7 +149,9 @@ def full_analysis(resume,jds,supplements=None,days=7):
  legacy.update({k:intel[k] for k in ('careerDirections','comparison','gaps','actionPlan','weeklyFocus')});legacy['candidateProfile']=intel['profile'];return legacy
 class Handler(BaseHTTPRequestHandler):
  def send(self,status,obj):
-  raw=json.dumps(obj,ensure_ascii=False).encode();self.send_response(status);self.send_header('Content-Type','application/json; charset=utf-8');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+  try:
+   raw=json.dumps(obj,ensure_ascii=False).encode();self.send_response(status);self.send_header('Content-Type','application/json; charset=utf-8');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+  except (BrokenPipeError,ConnectionResetError):pass  # User stopped waiting or closed the page.
  def do_GET(self):
   path=self.path.split('?')[0]
   if path=='/api/health':return self.send(200,{'status':'ok'})
@@ -332,12 +173,20 @@ class Handler(BaseHTTPRequestHandler):
     source=body.get('source')
     source_url=body.get('url') or body.get('sourceUrl','')
     if source=='url':
-     try:content=read_url(source_url)
-     except ValueError as exc:return self.send(200,{'needsSupplement':True,'sourceUrl':source_url,'sourcePlatform':platform_for(source_url),'message':str(exc)})
+     reading=read_job(source_url)
+     if reading.get('needsSupplement'):return self.send(200,reading)
+     content=reading['content'];source_url=reading['sourceUrl']
     elif source=='image':
+     if source_url:
+      try:source_url=normalize_url(source_url)
+      except ValueError:source_url=''
      images=body.get('images') or [{'data':body.get('data',''),'mime':body.get('mime','')}]
      content=vision(images)
-    elif source=='text':content=body.get('text','')
+    elif source=='text':
+     content=body.get('text','')
+     if source_url:
+      try:source_url=normalize_url(source_url)
+      except ValueError:source_url=''
     else:raise ValueError('请选择 JD 输入方式。')
     if len(content.strip())<35:raise ValueError('JD 内容不足，请补充岗位职责和任职要求。')
     jd_id=body.get('jdId') or uuid.uuid4().hex
@@ -346,7 +195,7 @@ class Handler(BaseHTTPRequestHandler):
      name=image.get('originalName') or image.get('name','截图')
      if name not in source_names:source_names.append(name)
     metadata={'jdId':jd_id,'sourceUrl':source_url,'sourcePlatform':platform_for(source_url) or ('岗位截图' if source=='image' else '手动 JD'),'sourceImage':source_names}
-    return self.send(200,{'jd':parse_jd(content,source,source_url,metadata)})
+    return self.send(200,{'readStatus':'success','method':reading.get('method') if source=='url' else source,'jd':parse_jd(content,source,source_url,metadata)})
    if self.path=='/api/analyze':
     resume=body.get('resume','');jds=body.get('jds',[])
     if len(resume.strip())<40:raise ValueError('请先上传简历。')

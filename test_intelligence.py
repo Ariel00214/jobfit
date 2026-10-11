@@ -1,7 +1,7 @@
 import os,sys,unittest,io
 sys.path.insert(0,os.path.dirname(__file__))
 from intelligence import parse_resume,parse_jd,analyze,action_plan
-from server import extract_job_payload,full_analysis,image_mime,optimize_ocr_image,merge_adjacent_ocr
+from server import full_analysis,image_mime,optimize_ocr_image,merge_adjacent_ocr
 from engine import parse_jd as parse_legacy_jd
 
 RESUME='''张三 产品运营 2021.01-2024.01 某科技公司
@@ -34,9 +34,7 @@ class JobFitTests(unittest.TestCase):
   before=analyze(RESUME,[self.jds[2]]);supp=[{'rawText':'独立负责一个 AI 助手需求分析和原型，组织测试并完成上线。','relatedCapability':'产品需求分析','ownership':'own','reusable':True}];after=analyze(RESUME,[self.jds[2]],supp)
   self.assertGreater(after['families'][0]['jobs'][0]['matchScore'],before['families'][0]['jobs'][0]['matchScore']);self.assertEqual(after['profile']['resumeFactRegistry'],parse_resume(RESUME)['resumeFactRegistry'])
   visible=full_analysis(RESUME,[parse_legacy_jd(JDS[2])],supp);visible_job=visible['families'][0]['jobs'][0];self.assertEqual(visible_job['matchScore'],visible_job['evidenceMatch']['matchScore'])
- def test_link_payload_and_ocr_identity(self):
-  html='''<title>AI产品经理招聘_星河科技</title><script>{"jobName":"AI产品经理","companyName":"星河科技有限公司","jobDescription":"负责用户研究、需求分析与产品上线，要求三年以上产品经验"}</script>'''
-  payload=extract_job_payload(html);self.assertIn('AI产品经理',payload);self.assertIn('星河科技有限公司',payload)
+ def test_ocr_identity(self):
   text='''【截图 1】\n星河科技有限公司\nAI产品经理\n负责用户研究、需求分析与产品上线\n任职要求：三年以上产品经验'''
   current=parse_jd(text,'image');legacy=parse_legacy_jd(text,'image');self.assertEqual(current['jobTitle'],'AI产品经理');self.assertEqual(current['company'],'星河科技有限公司');self.assertEqual(legacy['jobTitle'],'AI产品经理');self.assertEqual(legacy['company'],'星河科技有限公司')
  def test_ambiguous_identity_keeps_fallback(self):
