@@ -149,7 +149,9 @@ def full_analysis(resume,jds,supplements=None,days=7):
  legacy.update({k:intel[k] for k in ('careerDirections','comparison','gaps','actionPlan','weeklyFocus')});legacy['candidateProfile']=intel['profile'];return legacy
 class Handler(BaseHTTPRequestHandler):
  def send(self,status,obj):
-  raw=json.dumps(obj,ensure_ascii=False).encode();self.send_response(status);self.send_header('Content-Type','application/json; charset=utf-8');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+  try:
+   raw=json.dumps(obj,ensure_ascii=False).encode();self.send_response(status);self.send_header('Content-Type','application/json; charset=utf-8');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+  except (BrokenPipeError,ConnectionResetError):pass  # User stopped waiting or closed the page.
  def do_GET(self):
   path=self.path.split('?')[0]
   if path=='/api/health':return self.send(200,{'status':'ok'})

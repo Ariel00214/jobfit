@@ -39,6 +39,10 @@ def fixture_reader(value):
 
 def main():
     os.makedirs('work', exist_ok=True)
+    server_errors = []
+    class TestServer(ThreadingHTTPServer):
+        def handle_error(self, request, address):
+            server_errors.append(str(sys.exc_info()[1]))
     with tempfile.TemporaryDirectory() as folder:
         resume = Path(folder)/'resume.txt'; resume.write_text(RESUME)
         image = Image.new('RGB', (1000, 600), 'white'); draw = ImageDraw.Draw(image)
@@ -50,7 +54,7 @@ def main():
                                   'Work with engineering teams and test new features.']):
             draw.text((30, 30+i*70), line, fill='black', font=font)
         screenshot = Path(folder)/'job.png'; image.save(screenshot)
-        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        server = TestServer(('127.0.0.1', 0), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
             with patch('server.read_job', side_effect=fixture_reader), sync_playwright() as p:
@@ -120,6 +124,7 @@ def main():
                             page.locator('[data-page="results"]').click()
                         assert found_image and found_text
                         assert not errors, errors
+                        assert not server_errors, server_errors
                         page.screenshot(path=f'work/mobile-{width}.png', full_page=True)
                         context.close()
                         print(f'PASS {width}px: resume, 3 platform fixtures, text/image fallback, real OCR, cancel, match, sources')
