@@ -61,6 +61,9 @@ class LinkTests(unittest.TestCase):
                              ('<h1>产品经理招聘列表</h1>' + DESCRIPTION, 'unavailable')):
             with self.assertRaisesRegex(ValueError, reason):
                 links.extract(page, 'https://example.com/jobs')
+        data = {'jobName': '产品经理', 'jobDescription': DESCRIPTION}
+        with self.assertRaisesRegex(ValueError, 'unavailable'):
+            links.extract('<script>'+json.dumps(data)+'</script>', 'https://www.zhaopin.com/sou/jl653/kw123')
 
     def test_private_addresses_and_redirect_checked(self):
         with patch.object(socket, 'getaddrinfo', return_value=[(2, 1, 6, '', ('127.0.0.1', 80))]):

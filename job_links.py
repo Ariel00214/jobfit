@@ -131,6 +131,10 @@ def first(obj, keys):
 
 
 def extract(source, url):
+    # Known search/category routes cannot become a single job, even if one card
+    # happens to include a long description in embedded JSON.
+    if platform_for(url) != '招聘平台' and re.match(r'^/(?:sou(?:/|$)|s/|zhaopin/|city-|zp[^/]*|company/)', urlparse(url).path):
+        raise ValueError('unavailable')
     page = Page(); page.feed(source)
     visible = '\n'.join(page.visible)
     if EXPIRED.search(visible): raise ValueError('expired')
