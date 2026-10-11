@@ -1,0 +1,25 @@
+name: Mobile JD flow
+on:
+  push:
+    branches: [fix/mobile-job-links]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-dev.txt
+      - run: python -m unittest -v
+      - run: python -m playwright install --with-deps --only-shell chromium
+      - run: python tests/mobile_flow.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mobile-flow-screenshots
+          path: work/mobile-*.png
