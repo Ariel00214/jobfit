@@ -130,10 +130,14 @@ def first(obj, keys):
     return next((obj[k] for k in keys if isinstance(obj.get(k), (str, int)) and obj[k]), '')
 
 
+def listing_url(url):
+    return platform_for(url) != '招聘平台' and bool(re.match(r'^/(?:sou(?:/|$)|s/|zhaopin/|city-|zp[^/]*|company/)', urlparse(url).path))
+
+
 def extract(source, url):
     # Known search/category routes cannot become a single job, even if one card
     # happens to include a long description in embedded JSON.
-    if platform_for(url) != '招聘平台' and re.match(r'^/(?:sou(?:/|$)|s/|zhaopin/|city-|zp[^/]*|company/)', urlparse(url).path):
+    if listing_url(url):
         raise ValueError('unavailable')
     page = Page(); page.feed(source)
     visible = '\n'.join(page.visible)
@@ -199,7 +203,21 @@ def fetch_html(url, deadline):
     raise ValueError('unavailable')
 
 
+def browser_memory_available():
+    # OCR retains its model arena after use. Leave room for Chromium on small
+    # cgroup-limited hosts instead of letting a render kill the whole server.
+    for limit_path, usage_path in (('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.current'),
+                                   ('/sys/fs/cgroup/memory/memory.limit_in_bytes', '/sys/fs/cgroup/memory/memory.usage_in_bytes')):
+        try:
+            with open(limit_path) as f: limit = int(f.read().strip())
+            with open(usage_path) as f: usage = int(f.read().strip())
+            return limit - usage >= 256 * 1024 * 1024
+        except (OSError, ValueError): continue
+    return True
+
+
 def browser_html(url, deadline):
+    if not browser_memory_available(): raise ValueError('unavailable')
     from playwright.sync_api import sync_playwright
     bundled = os.path.join(os.path.dirname(__file__), '.playwright')
     if os.path.isdir(bundled): os.environ.setdefault('PLAYWRIGHT_BROWSERS_PATH', bundled)
@@ -264,6 +282,7 @@ def worker(url):
 def read_job(value):
     try: url = normalize_url(value)
     except ValueError as exc: return failure(str(exc))
+    if listing_url(url): return failure('unavailable', url)
     if not _SLOT.acquire(blocking=False): return failure('busy', url)
     try:
         # Isolate DNS, network and rendering together so a slow stage cannot exceed the total budget.
