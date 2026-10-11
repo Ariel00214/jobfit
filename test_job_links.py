@@ -12,6 +12,23 @@ DESCRIPTION = ('岗位职责：负责用户需求分析、产品原型设计，�
 
 
 class LinkTests(unittest.TestCase):
+    def test_listing_rejected_before_starting_worker(self):
+        with patch('job_links.subprocess.Popen') as process:
+            result = links.read_job('https://www.zhaopin.com/sou/jl653/kwtest')
+        process.assert_not_called()
+        self.assertTrue(result['needsSupplement'])
+        self.assertIn('/sou/', result['sourceUrl'])
+
+    def test_browser_skips_render_when_memory_is_low(self):
+        from unittest.mock import mock_open
+        with patch('builtins.open', mock_open()) as opened:
+            opened.side_effect = [mock_open(read_data=str(512*1024*1024))(),
+                                  mock_open(read_data=str(375*1024*1024))()]
+            self.assertFalse(links.browser_memory_available())
+        with patch('job_links.browser_memory_available', return_value=False):
+            with self.assertRaisesRegex(ValueError, 'unavailable'):
+                links.browser_html('https://m.liepin.com/job/123.shtml', 0)
+
     def test_mobile_share_and_markdown_preserve_query(self):
         url = 'https://m.zhipin.com/mpa/html/weijd/weijd-job/abc?sid=1&openWeapp=1'
         self.assertEqual(links.normalize_url('看看这个岗位：' + url + '。'), url)
