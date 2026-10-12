@@ -95,5 +95,10 @@ class JobFitTests(unittest.TestCase):
    combine_ocr_parts([{'imageIndex':0,'partIndex':0,'totalParts':2,'text':'岗位名称：产品经理\n岗位职责：负责产品规划与交付。'}])
   with self.assertRaisesRegex(ValueError,'内容不完整'):
    combine_ocr_parts([{'imageIndex':0,'partIndex':0,'totalParts':1,'text':''}])
+ def test_duplicate_and_non_contiguous_slice_indexes_are_rejected(self):
+  duplicate=[{'imageIndex':0,'partIndex':0,'totalParts':1,'text':'岗位名称：产品经理\n岗位职责：负责产品规划与交付。'}]*2
+  with self.assertRaisesRegex(ValueError,'索引重复'):combine_ocr_parts(duplicate)
+  with self.assertRaisesRegex(ValueError,'索引不连续'):
+   combine_ocr_parts([{'imageIndex':1,'partIndex':0,'totalParts':1,'text':'岗位名称：产品经理\n岗位职责：负责产品规划与交付。'}])
 
 if __name__=='__main__':unittest.main()

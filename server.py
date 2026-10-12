@@ -1,4 +1,4 @@
-import os,json,re,zipfile,io,base64,uuid,threading,time,subprocess,sys
+import os,json,re,zipfile,io,base64,uuid,threading,time,subprocess,sys,struct,atexit
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
 from email.parser import BytesParser
 from email.policy import default
@@ -8,9 +8,11 @@ from intelligence import analyze as analyze_intelligence
 from job_links import read_job, platform_for, normalize_url
 
 ROOT=os.path.dirname(__file__)
-_OCR=None
-_OCR_LOCK=threading.Lock()
 _OCR_RUN_LOCK=threading.Lock()
+_OCR_PROCESS=None
+OCR_WIDTH=1200;OCR_HEIGHT=1400;OCR_PIXELS=1700000;OCR_TIMEOUT=45
+class OcrTemporaryError(Exception):pass
+class OcrTimeoutError(OcrTemporaryError):pass
 def memory_stats():
  """Small, content-free cgroup snapshot for diagnosing OCR resource failures."""
  stats={}
@@ -37,19 +39,6 @@ def read_file(name,data):
   return read_pdf(data)
  raise ValueError('简历仅支持 PDF、DOCX、TXT。')
 
-def _ocr_lines(result):
- """Normalize RapidOCR 1.x/2.x/3.x results into plain text lines."""
- if result is None:return []
- if hasattr(result,'txts'):return [str(x) for x in result.txts if str(x).strip()]
- if isinstance(result,tuple):result=result[0]
- lines=[]
- for item in result or []:
-  if isinstance(item,(list,tuple)) and len(item)>1:
-   value=item[1]
-   if isinstance(value,(list,tuple)):value=value[0] if value else ''
-   if str(value).strip():lines.append(str(value))
- return lines
-
 def read_pdf(data):
  """Extract text with PyMuPDF; OCR only pages that lack a usable text layer."""
  try:
@@ -59,16 +48,18 @@ def read_pdf(data):
   raise ValueError('PDF 读取失败，请确认文件未损坏或加密。') from exc
  if doc.needs_pass:
   doc.close();raise ValueError('PDF 已加密，请先移除密码后再上传。')
- pages=[];ocr=None
+ pages=[]
  try:
   for page in doc:
    text=page.get_text('text',sort=True).strip()
    # A page number or watermark alone is not a usable text layer.
    if len(re.sub(r'\s+','',text))<20:
     try:
-     if ocr is None:ocr=ocr_engine()
      pix=page.get_pixmap(matrix=pymupdf.Matrix(2,2),alpha=False)
-     text='\n'.join(_ocr_lines(ocr(pix.tobytes('png')))).strip()
+     text=''
+     for prepared in ocr_tiles(pix.tobytes('png')):
+      with _OCR_RUN_LOCK:piece=isolated_ocr_tile(prepared).strip()
+      if piece:text=merge_adjacent_ocr(text,piece)
     except Exception as exc:
      raise ValueError('扫描版 PDF 的本地 OCR 失败，请检查 rapidocr/onnxruntime 依赖。') from exc
    if text:pages.append(text)
@@ -81,14 +72,6 @@ def image_mime(item):
   ext=os.path.splitext(str(item.get('name') or ''))[1].lower()
   mime={'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp'}.get(ext,'')
  return mime
-def ocr_engine():
- global _OCR
- if _OCR is None:
-  with _OCR_LOCK:
-   if _OCR is None:
-    from rapidocr import RapidOCR
-    _OCR=RapidOCR(params={'Global.use_cls':False,'Global.log_level':'error','EngineConfig.onnxruntime.intra_op_num_threads':1,'EngineConfig.onnxruntime.inter_op_num_threads':1})
- return _OCR
 def optimize_ocr_image(data):
  """Decode and normalize an OCR part without another lossy JPEG round-trip."""
  from PIL import Image,ImageOps
@@ -122,21 +105,53 @@ def ocr_tiles(data):
     top=bottom-overlap
  except ValueError:raise
  except Exception as exc:raise ValueError('图片格式无法读取，请改用清晰的 JPG 或 PNG 截图。') from exc
-def isolated_ocr_tile(prepared):
- """Release OCR's native memory after each tile; never risk the web process."""
- height,width=prepared.shape[:2]
+def stop_ocr_worker():
+ global _OCR_PROCESS
+ process=_OCR_PROCESS;_OCR_PROCESS=None
+ if process and process.poll() is None:
+  process.kill()
+  try:process.wait(timeout=3)
+  except subprocess.TimeoutExpired:pass
+atexit.register(stop_ocr_worker)
+def start_ocr_worker():
+ global _OCR_PROCESS
+ if _OCR_PROCESS is None or _OCR_PROCESS.poll() is not None:
+  stop_ocr_worker()
+  _OCR_PROCESS=subprocess.Popen([sys.executable,os.path.join(ROOT,'ocr_worker.py')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,bufsize=0)
+  print(f'[OCR] worker started pid={_OCR_PROCESS.pid}',flush=True)
+ return _OCR_PROCESS
+def _read_worker_response(process,holder):
  try:
-  result=subprocess.run([sys.executable,os.path.join(ROOT,'ocr_worker.py'),str(width),str(height)],
-                        input=prepared.tobytes(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-                        timeout=45,check=False)
-  if result.returncode!=0:
-   print(f'[OCR] tile worker exited {result.returncode}: {result.stderr[-500:].decode(errors="replace")}',flush=True)
-   raise ValueError('图片识别资源不足，请重试或分开上传截图。')
-  return json.loads(result.stdout)['text']
- except subprocess.TimeoutExpired as exc:raise ValueError('图片单片识别超时，请重试或分开上传截图。') from exc
- except (OSError,ValueError,KeyError,UnicodeError) as exc:
-  if isinstance(exc,ValueError):raise
-  raise ValueError('图片识别暂时失败，请重试。') from exc
+  header=process.stdout.read(4)
+  if len(header)!=4:raise EOFError('missing response header')
+  size=struct.unpack('!I',header)[0]
+  if not 1<=size<=1024*1024:raise ValueError('invalid response size')
+  raw=process.stdout.read(size)
+  if len(raw)!=size:raise EOFError('truncated response')
+  holder.append(json.loads(raw))
+ except Exception as exc:holder.append(exc)
+def isolated_ocr_tile(prepared):
+ """Use one bounded model process; timeout/crash kills it before another starts."""
+ height,width=prepared.shape[:2]
+ if width>OCR_WIDTH or height>OCR_HEIGHT or width*height>OCR_PIXELS:raise ValueError('图片分片尺寸超出安全范围，请重新选择截图。')
+ raw=prepared.tobytes();process=start_ocr_worker();holder=[]
+ try:
+  process.stdin.write(struct.pack('!III',width,height,len(raw))+raw);process.stdin.flush()
+  reader=threading.Thread(target=_read_worker_response,args=(process,holder),daemon=True);reader.start();reader.join(OCR_TIMEOUT)
+  if reader.is_alive():
+   stop_ocr_worker();reader.join(2);raise OcrTimeoutError('图片单片识别超时，请重试。')
+  if not holder or isinstance(holder[0],Exception):
+   detail=repr(holder[0]) if holder else 'empty response';stop_ocr_worker()
+   print(f'[OCR] worker response failed: {detail}',flush=True)
+   raise OcrTemporaryError('图片识别服务已恢复，请重试当前分片。')
+  result=holder[0]
+  if result.get('error'):
+   print(f"[OCR] worker error pid={result.get('pid')} {result['error']}",flush=True)
+   raise ValueError('图片识别失败，请检查截图是否清晰。')
+  print(f"[OCR] worker pid={result.get('pid')} init={result.get('initMs',0)}ms infer={result.get('inferenceMs',0)}ms peak={result.get('peakMb')}MB",flush=True)
+  return result.get('text','')
+ except (BrokenPipeError,OSError) as exc:
+  stop_ocr_worker();raise OcrTemporaryError('图片识别服务已恢复，请重试当前分片。') from exc
 def merge_adjacent_ocr(previous,current):
  """Remove only exact line overlap at adjacent slice boundaries."""
  left=[x.strip() for x in previous.splitlines() if x.strip()]
@@ -188,11 +203,13 @@ def recognize_slice(item):
  try:data=base64.b64decode(item.get('data',''),validate=True)
  except Exception as exc:raise ValueError('图片数据损坏，请重新选择截图。') from exc
  if len(data)>12*1024*1024:raise ValueError('单个图片分片不得超过 12 MB。')
- text=''
- for prepared in ocr_tiles(data):
-  with _OCR_RUN_LOCK:piece=isolated_ocr_tile(prepared).strip()
-  if piece:text=merge_adjacent_ocr(text,piece)
- return text
+ started=time.perf_counter();prepared=optimize_ocr_image(data)
+ height,width=prepared.shape[:2]
+ if width>OCR_WIDTH or height>OCR_HEIGHT or width*height>OCR_PIXELS:raise ValueError('图片分片尺寸超出安全范围，请重新选择截图。')
+ with _OCR_RUN_LOCK:piece=isolated_ocr_tile(prepared).strip()
+ identity=f"{int(item.get('imageIndex',0))+1}:{int(item.get('partIndex',0))+1}/{int(item.get('totalParts',1))}"
+ print(f'[OCR] slice={identity} size={width}x{height} total={(time.perf_counter()-started)*1000:.0f}ms memory={memory_stats()}',flush=True)
+ return piece
 def combine_ocr_parts(parts):
  if not isinstance(parts,list) or not 1<=len(parts)<=60:raise ValueError('请选择 1～10 张岗位截图。')
  grouped={};indexes=set();received={};expected={}
@@ -201,11 +218,14 @@ def combine_ocr_parts(parts):
   if index<0 or index>9 or len(indexes)>10:raise ValueError('请选择 1～10 张岗位截图。')
   if part_index<0 or total_parts<1 or total_parts>60 or part_index>=total_parts:raise ValueError('截图分片顺序不正确，请重新选择截图。')
   if index in expected and expected[index]!=total_parts:raise ValueError('截图分片数量不一致，请重新选择截图。')
-  expected[index]=total_parts;received.setdefault(index,set()).add(part_index)
+  expected[index]=total_parts
+  if part_index in received.setdefault(index,set()):raise ValueError('截图分片索引重复，请重新选择截图。')
+  received[index].add(part_index)
   piece=item.get('text','')
   if not isinstance(piece,str) or len(piece)>12000:raise ValueError('截图文字格式不正确。')
   if not piece.strip():raise ValueError('存在未识别成功的截图分片，JD 内容不完整，请重试。')
   grouped[index]=merge_adjacent_ocr(grouped.get(index,''),piece)
+ if indexes!=set(range(len(indexes))):raise ValueError('截图索引不连续，JD 内容不完整，请重试。')
  for index in indexes:
   if received[index]!=set(range(expected[index])):raise ValueError('截图分片缺失，JD 内容不完整，请重试。')
  content='\n\n'.join('【截图 '+str(index+1)+'】\n'+grouped[index] for index in sorted(grouped))
@@ -288,7 +308,11 @@ class Handler(BaseHTTPRequestHandler):
     if not 1<=len(jds)<=10:raise ValueError('请添加 1～10 个岗位 JD。')
     return self.send(200,full_analysis(resume,jds,body.get('supplements',[]),body.get('days',7)))
    return self.send(404,{'error':'Not found'})
-  except ValueError as e:return self.send(400,{'error':str(e)})
-  except Exception as e:return self.send(500,{'error':'处理失败，请检查文件或重试。'})
+  except OcrTimeoutError as e:return self.send(504,{'error':str(e),'code':'ocr_timeout','retryable':True})
+  except OcrTemporaryError as e:return self.send(503,{'error':str(e),'code':'ocr_worker_unavailable','retryable':True})
+  except ValueError as e:return self.send(400,{'error':str(e),'code':'invalid_input','retryable':False})
+  except Exception as e:
+   print(f'[ERROR] {self.path}: {type(e).__name__}: {e}',flush=True)
+   return self.send(500,{'error':'处理失败，请检查文件或重试。','code':'server_error','retryable':True})
 if __name__=='__main__':
  port=int(os.environ.get('PORT','8765'));print(f'JobFit http://127.0.0.1:{port}',flush=True);ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()

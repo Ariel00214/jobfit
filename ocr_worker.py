@@ -1,10 +1,9 @@
-"""Run one bounded OCR tile in a disposable process.
-
-The web process deliberately does not retain an OCR model. This prevents
-successive dense screenshot slices from accumulating native inference memory.
-"""
+"""Single long-lived RapidOCR process using a small framed stdio protocol."""
 import json
+import os
+import struct
 import sys
+import time
 
 
 def lines(result):
@@ -25,21 +24,57 @@ def lines(result):
     return found
 
 
+def peak_mb():
+    try:
+        import resource
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return round(peak / (1024 if sys.platform != 'darwin' else 1024 * 1024), 1)
+    except (ImportError, OSError):
+        return None
+
+
+def read_exact(size):
+    chunks = []
+    while size:
+        chunk = sys.stdin.buffer.read(size)
+        if not chunk:
+            raise EOFError
+        chunks.append(chunk); size -= len(chunk)
+    return b''.join(chunks)
+
+
+def respond(payload):
+    raw = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+    sys.stdout.buffer.write(struct.pack('!I', len(raw)) + raw)
+    sys.stdout.buffer.flush()
+
+
 def main():
     import numpy as np
     from rapidocr import RapidOCR
 
-    width = int(sys.argv[1]); height = int(sys.argv[2])
-    if not 1 <= width <= 1200 or not 1 <= height <= 900:
-        raise ValueError('OCR tile dimensions out of range')
-    raw = sys.stdin.buffer.read(width * height * 3 + 1)
-    if len(raw) != width * height * 3:
-        raise ValueError('OCR tile data length mismatch')
-    image = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
+    initialized = time.perf_counter()
     engine = RapidOCR(params={'Global.use_cls': False, 'Global.log_level': 'error',
                               'EngineConfig.onnxruntime.intra_op_num_threads': 1,
                               'EngineConfig.onnxruntime.inter_op_num_threads': 1})
-    sys.stdout.buffer.write(json.dumps({'text': '\n'.join(lines(engine(image)))}, ensure_ascii=False).encode('utf-8'))
+    init_ms = round((time.perf_counter() - initialized) * 1000)
+    while True:
+        try:
+            width, height, byte_count = struct.unpack('!III', read_exact(12))
+        except EOFError:
+            return
+        try:
+            if not 1 <= width <= 1200 or not 1 <= height <= 1400 or byte_count != width * height * 3:
+                raise ValueError('OCR tile dimensions out of range')
+            raw = read_exact(byte_count)
+            image = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
+            started = time.perf_counter(); result = engine(image)
+            respond({'text': '\n'.join(lines(result)), 'initMs': init_ms,
+                     'inferenceMs': round((time.perf_counter() - started) * 1000),
+                     'peakMb': peak_mb(), 'pid': os.getpid()})
+            init_ms = 0
+        except Exception as exc:
+            respond({'error': f'{type(exc).__name__}: {exc}', 'peakMb': peak_mb(), 'pid': os.getpid()})
 
 
 if __name__ == '__main__':

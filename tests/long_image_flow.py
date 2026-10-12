@@ -71,7 +71,7 @@ def main():
                         records.append((label, len(slices), elapsed, len(raw)))
                         context.close()
 
-                    # Two failures of one slice must retry only that slice and never save a partial JD.
+                    # Bounded failures of one slice must retry only that slice and never save a partial JD.
                     context = browser.new_context(viewport={'width': 390, 'height': 844}, is_mobile=True)
                     page = context.new_page(); calls = {'count': 0}
                     def fail_slice(route):
@@ -83,10 +83,10 @@ def main():
                     page.locator('#jd-image').set_input_files(str(long)); page.get_by_text('1 张已就绪', exact=True).wait_for()
                     page.locator('#save-jd').click(); page.locator('.alert').first.wait_for()
                     assert 'JD 内容可能不完整' in page.locator('.alert').first.inner_text()
-                    assert calls['count'] == 2 and page.evaluate('state.jds.length') == 0
+                    assert calls['count'] == 3 and page.evaluate('state.jds.length') == 0
                     records.append(('injected-failure', calls['count'], 0, 0)); context.close()
 
-                    # A per-slice timeout is retried once and also cannot create a partial JD.
+                    # A per-slice timeout is retried a bounded number of times and cannot create a partial JD.
                     context = browser.new_context(viewport={'width': 1440, 'height': 900})
                     page = context.new_page(); calls = {'count': 0}
                     def slow_slice(route):
@@ -98,7 +98,7 @@ def main():
                     page.locator('#add').click(); page.locator('[data-mode="image"]').click()
                     page.locator('#jd-image').set_input_files(str(normal)); page.get_by_text('1 张已就绪', exact=True).wait_for()
                     page.locator('#save-jd').click(); page.locator('.alert').first.wait_for()
-                    assert calls['count'] == 2 and page.evaluate('state.jds.length') == 0
+                    assert calls['count'] == 3 and page.evaluate('state.jds.length') == 0
                     records.append(('injected-timeout', calls['count'], 0, 0)); context.close()
                 finally: browser.close()
         finally: server.shutdown(); server.server_close()
