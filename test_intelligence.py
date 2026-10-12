@@ -64,12 +64,11 @@ class JobFitTests(unittest.TestCase):
   shapes=[tile.shape[:2] for tile in ocr_tiles(source.getvalue())]
   self.assertGreaterEqual(len(shapes),6)
   self.assertTrue(all(height<=900 and width<=1200 for height,width in shapes))
-  class FakeOCR:
-   def __call__(self,image):
-    self_shapes.append(image.shape[:2])
-    return [('box',('招聘岗位：内容增长，负责制定内容策略、运营渠道、分析用户增长数据并持续优化转化。',1))]
+  def fake_ocr(image):
+   self_shapes.append(image.shape[:2])
+   return '招聘岗位：内容增长，负责制定内容策略、运营渠道、分析用户增长数据并持续优化转化。'
   self_shapes=[]
-  with patch('server.ocr_engine',return_value=FakeOCR()):
+  with patch('server.isolated_ocr_tile',side_effect=fake_ocr):
    content=vision([{'name':'long.jpg','mime':'image/jpeg','data':base64.b64encode(source.getvalue()).decode()}])
   self.assertIn('内容增长',content)
   self.assertEqual(self_shapes,shapes)

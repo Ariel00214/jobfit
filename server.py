@@ -1,4 +1,4 @@
-import os,json,re,zipfile,io,base64,uuid,threading,time
+import os,json,re,zipfile,io,base64,uuid,threading,time,subprocess,sys
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
 from email.parser import BytesParser
 from email.policy import default
@@ -108,6 +108,21 @@ def ocr_tiles(data):
     top=bottom-overlap
  except ValueError:raise
  except Exception as exc:raise ValueError('图片格式无法读取，请改用清晰的 JPG 或 PNG 截图。') from exc
+def isolated_ocr_tile(prepared):
+ """Release OCR's native memory after each tile; never risk the web process."""
+ height,width=prepared.shape[:2]
+ try:
+  result=subprocess.run([sys.executable,os.path.join(ROOT,'ocr_worker.py'),str(width),str(height)],
+                        input=prepared.tobytes(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                        timeout=45,check=False)
+  if result.returncode!=0:
+   print(f'[OCR] tile worker exited {result.returncode}: {result.stderr[-500:].decode(errors="replace")}',flush=True)
+   raise ValueError('图片识别资源不足，请重试或分开上传截图。')
+  return json.loads(result.stdout)['text']
+ except subprocess.TimeoutExpired as exc:raise ValueError('图片单片识别超时，请重试或分开上传截图。') from exc
+ except (OSError,ValueError,KeyError,UnicodeError) as exc:
+  if isinstance(exc,ValueError):raise
+  raise ValueError('图片识别暂时失败，请重试。') from exc
 def merge_adjacent_ocr(previous,current):
  """Remove only exact line overlap at adjacent slice boundaries."""
  left=[x.strip() for x in previous.splitlines() if x.strip()]
@@ -123,7 +138,6 @@ def vision(images):
  if not isinstance(images,list) or not 1<=len(images)<=60:raise ValueError('请选择 1～10 张岗位截图。')
  started=time.perf_counter();decode_ms=prepare_ms=run_ms=0;total=0;grouped={};tile_count=0
  try:
-  ocr=ocr_engine()
   ordered=sorted(enumerate(images),key=lambda pair:(int(pair[1].get('imageIndex',pair[0])),int(pair[1].get('partIndex',0))))
   image_indexes={int(item.get('imageIndex',position)) for position,item in enumerate(images)}
   if len(image_indexes)>10:raise ValueError('请选择 1～10 张岗位截图。')
@@ -140,7 +154,7 @@ def vision(images):
    for prepared in ocr_tiles(data):
     prepare_ms+=(time.perf_counter()-tick)*1000;tile_count+=1
     tick=time.perf_counter()
-    with _OCR_RUN_LOCK:piece='\n'.join(_ocr_lines(ocr(prepared))).strip()
+    with _OCR_RUN_LOCK:piece=isolated_ocr_tile(prepared).strip()
     run_ms+=(time.perf_counter()-tick)*1000
     del prepared
     if piece:text=merge_adjacent_ocr(text,piece)
@@ -231,4 +245,4 @@ class Handler(BaseHTTPRequestHandler):
   except ValueError as e:return self.send(400,{'error':str(e)})
   except Exception as e:return self.send(500,{'error':'处理失败，请检查文件或重试。'})
 if __name__=='__main__':
- port=int(os.environ.get('PORT','8765'));ocr_engine();print(f'JobFit http://127.0.0.1:{port}',flush=True);ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()
+ port=int(os.environ.get('PORT','8765'));print(f'JobFit http://127.0.0.1:{port}',flush=True);ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()
