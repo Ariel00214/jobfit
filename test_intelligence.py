@@ -77,7 +77,7 @@ class JobFitTests(unittest.TestCase):
   source=io.BytesIO();Image.new('RGB',(1134,900),'white').save(source,'JPEG')
   with patch('server.isolated_ocr_tile',return_value='浙江连信科技有限公司正在招聘\n内容增长（AI内容方向)\n负责内容策略与用户增长。'):
    first=recognize_slice({'name':'part1.jpg','mime':'image/jpeg','data':base64.b64encode(source.getvalue()).decode()})
-  combined=combine_ocr_parts([{'imageIndex':0,'partIndex':0,'text':first},{'imageIndex':0,'partIndex':1,'text':'任职要求：熟悉内容运营和数据分析。'}])
+  combined=combine_ocr_parts([{'imageIndex':0,'partIndex':0,'totalParts':2,'text':first},{'imageIndex':0,'partIndex':1,'totalParts':2,'text':'任职要求：熟悉内容运营和数据分析。'}])
   parsed=parse_legacy_jd(combined,'image')
   self.assertEqual(parsed['jobTitle'],'内容增长（AI内容方向)')
   self.assertEqual(parsed['company'],'浙江连信科技有限公司')
@@ -90,5 +90,10 @@ class JobFitTests(unittest.TestCase):
   self.assertEqual(merged.count('完成产品上线'),1)
   self.assertTrue(merged.endswith('负责数据复盘'))
   self.assertEqual(merge_adjacent_ocr('沟通能力\n其他内容','沟通能力\n团队合作').count('沟通能力'),2)
+ def test_incomplete_slice_set_is_rejected(self):
+  with self.assertRaisesRegex(ValueError,'内容不完整'):
+   combine_ocr_parts([{'imageIndex':0,'partIndex':0,'totalParts':2,'text':'岗位名称：产品经理\n岗位职责：负责产品规划与交付。'}])
+  with self.assertRaisesRegex(ValueError,'内容不完整'):
+   combine_ocr_parts([{'imageIndex':0,'partIndex':0,'totalParts':1,'text':''}])
 
 if __name__=='__main__':unittest.main()

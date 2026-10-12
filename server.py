@@ -195,13 +195,19 @@ def recognize_slice(item):
  return text
 def combine_ocr_parts(parts):
  if not isinstance(parts,list) or not 1<=len(parts)<=60:raise ValueError('请选择 1～10 张岗位截图。')
- grouped={};indexes=set()
+ grouped={};indexes=set();received={};expected={}
  for item in sorted(parts,key=lambda p:(int(p.get('imageIndex',0)),int(p.get('partIndex',0)))):
-  index=int(item.get('imageIndex',0));indexes.add(index)
+  index=int(item.get('imageIndex',0));part_index=int(item.get('partIndex',0));total_parts=int(item.get('totalParts',1));indexes.add(index)
   if index<0 or index>9 or len(indexes)>10:raise ValueError('请选择 1～10 张岗位截图。')
+  if part_index<0 or total_parts<1 or total_parts>60 or part_index>=total_parts:raise ValueError('截图分片顺序不正确，请重新选择截图。')
+  if index in expected and expected[index]!=total_parts:raise ValueError('截图分片数量不一致，请重新选择截图。')
+  expected[index]=total_parts;received.setdefault(index,set()).add(part_index)
   piece=item.get('text','')
   if not isinstance(piece,str) or len(piece)>12000:raise ValueError('截图文字格式不正确。')
-  if piece.strip():grouped[index]=merge_adjacent_ocr(grouped.get(index,''),piece)
+  if not piece.strip():raise ValueError('存在未识别成功的截图分片，JD 内容不完整，请重试。')
+  grouped[index]=merge_adjacent_ocr(grouped.get(index,''),piece)
+ for index in indexes:
+  if received[index]!=set(range(expected[index])):raise ValueError('截图分片缺失，JD 内容不完整，请重试。')
  content='\n\n'.join('【截图 '+str(index+1)+'】\n'+grouped[index] for index in sorted(grouped))
  if len(re.sub(r'\s+','',content))<30:raise ValueError('这张截图没有识别到足够的 JD 文字，请尝试上传更清晰的截图。')
  return content

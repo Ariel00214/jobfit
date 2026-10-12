@@ -3,7 +3,7 @@ services:
     name: jobfit
     runtime: python
     region: singapore
-    plan: 1c-2g
+    plan: free
     buildCommand: bash build.sh
     startCommand: python server.py
     healthCheckPath: /api/health
