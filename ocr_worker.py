@@ -55,7 +55,7 @@ def main():
 
     initialized = time.perf_counter()
     engine = RapidOCR(params={'Global.use_cls': False, 'Global.log_level': 'error',
-                              'Det.limit_type': 'max', 'Det.limit_side_len': 1200,
+                              'Det.limit_type': 'max', 'Det.limit_side_len': 960,
                               'EngineConfig.onnxruntime.intra_op_num_threads': 1,
                               'EngineConfig.onnxruntime.inter_op_num_threads': 1})
     init_ms = round((time.perf_counter() - initialized) * 1000)
