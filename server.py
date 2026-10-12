@@ -167,6 +167,30 @@ def vision(images):
  print(f'[OCR] images={len(image_indexes)} parts={len(images)} tiles={tile_count} decode={decode_ms:.0f}ms prepare={prepare_ms:.0f}ms run={run_ms:.0f}ms total={total_ms:.0f}ms',flush=True)
  if len(re.sub(r'\s+','',content))<30:raise ValueError('这张截图没有识别到足够的 JD 文字，请尝试上传更清晰的截图。')
  return content
+def recognize_slice(item):
+ """OCR one browser-sized slice so long screenshots do not hold one HTTP request."""
+ mime=image_mime(item)
+ if mime not in ('image/png','image/jpeg','image/webp'):raise ValueError('截图支持 PNG、JPG、WEBP。')
+ try:data=base64.b64decode(item.get('data',''),validate=True)
+ except Exception as exc:raise ValueError('图片数据损坏，请重新选择截图。') from exc
+ if len(data)>12*1024*1024:raise ValueError('单个图片分片不得超过 12 MB。')
+ text=''
+ for prepared in ocr_tiles(data):
+  with _OCR_RUN_LOCK:piece=isolated_ocr_tile(prepared).strip()
+  if piece:text=merge_adjacent_ocr(text,piece)
+ return text
+def combine_ocr_parts(parts):
+ if not isinstance(parts,list) or not 1<=len(parts)<=60:raise ValueError('请选择 1～10 张岗位截图。')
+ grouped={};indexes=set()
+ for item in sorted(parts,key=lambda p:(int(p.get('imageIndex',0)),int(p.get('partIndex',0)))):
+  index=int(item.get('imageIndex',0));indexes.add(index)
+  if index<0 or index>9 or len(indexes)>10:raise ValueError('请选择 1～10 张岗位截图。')
+  piece=item.get('text','')
+  if not isinstance(piece,str) or len(piece)>12000:raise ValueError('截图文字格式不正确。')
+  if piece.strip():grouped[index]=merge_adjacent_ocr(grouped.get(index,''),piece)
+ content='\n\n'.join('【截图 '+str(index+1)+'】\n'+grouped[index] for index in sorted(grouped))
+ if len(re.sub(r'\s+','',content))<30:raise ValueError('这张截图没有识别到足够的 JD 文字，请尝试上传更清晰的截图。')
+ return content
 
 def full_analysis(resume,jds,supplements=None,days=7):
  legacy=analyze(resume,jds);intel=analyze_intelligence(resume,jds,supplements or [],days)
@@ -209,6 +233,8 @@ class Handler(BaseHTTPRequestHandler):
     data=base64.b64decode(body['data']);text=read_file(body['name'],data)
     if len(text.strip())<40:raise ValueError('简历没有提取到足够文字，请使用文字版文件。')
     return self.send(200,{'text':text})
+   if self.path=='/api/ocr-slice':
+    return self.send(200,{'text':recognize_slice(body.get('image') or {})})
    if self.path=='/api/parse-jd':
     source=body.get('source')
     source_url=body.get('url') or body.get('sourceUrl','')
@@ -221,7 +247,7 @@ class Handler(BaseHTTPRequestHandler):
       try:source_url=normalize_url(source_url)
       except ValueError:source_url=''
      images=body.get('images') or [{'data':body.get('data',''),'mime':body.get('mime','')}]
-     content=vision(images)
+     content=combine_ocr_parts(body['ocrParts']) if 'ocrParts' in body else vision(images)
     elif source=='text':
      content=body.get('text','')
      if source_url:

@@ -2,7 +2,7 @@ import os,sys,unittest,io,base64
 from unittest.mock import patch
 sys.path.insert(0,os.path.dirname(__file__))
 from intelligence import parse_resume,parse_jd,analyze,action_plan
-from server import full_analysis,image_mime,optimize_ocr_image,ocr_tiles,vision,merge_adjacent_ocr
+from server import full_analysis,image_mime,optimize_ocr_image,ocr_tiles,vision,recognize_slice,combine_ocr_parts,merge_adjacent_ocr
 from engine import parse_jd as parse_legacy_jd
 
 RESUME='''张三 产品运营 2021.01-2024.01 某科技公司
@@ -72,6 +72,16 @@ class JobFitTests(unittest.TestCase):
    content=vision([{'name':'long.jpg','mime':'image/jpeg','data':base64.b64encode(source.getvalue()).decode()}])
   self.assertIn('内容增长',content)
   self.assertEqual(self_shapes,shapes)
+ def test_sequential_slice_ocr_combines_into_one_job(self):
+  from PIL import Image
+  source=io.BytesIO();Image.new('RGB',(1134,900),'white').save(source,'JPEG')
+  with patch('server.isolated_ocr_tile',return_value='浙江连信科技有限公司正在招聘\n内容增长（AI内容方向)\n负责内容策略与用户增长。'):
+   first=recognize_slice({'name':'part1.jpg','mime':'image/jpeg','data':base64.b64encode(source.getvalue()).decode()})
+  combined=combine_ocr_parts([{'imageIndex':0,'partIndex':0,'text':first},{'imageIndex':0,'partIndex':1,'text':'任职要求：熟悉内容运营和数据分析。'}])
+  parsed=parse_legacy_jd(combined,'image')
+  self.assertEqual(parsed['jobTitle'],'内容增长（AI内容方向)')
+  self.assertEqual(parsed['company'],'浙江连信科技有限公司')
+  self.assertIn('任职要求',combined)
  def test_slice_overlap_dedup_is_boundary_only(self):
   previous='负责 AI 产品设计\n参与需求分析\n完成产品上线'
   current='参与需求分析\n完成产品上线\n负责数据复盘'
