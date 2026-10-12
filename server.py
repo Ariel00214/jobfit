@@ -11,6 +11,20 @@ ROOT=os.path.dirname(__file__)
 _OCR=None
 _OCR_LOCK=threading.Lock()
 _OCR_RUN_LOCK=threading.Lock()
+def memory_stats():
+ """Small, content-free cgroup snapshot for diagnosing OCR resource failures."""
+ stats={}
+ for key,path in (('current','/sys/fs/cgroup/memory.current'),('peak','/sys/fs/cgroup/memory.peak'),('limit','/sys/fs/cgroup/memory.max')):
+  try:
+   with open(path) as file:value=file.read().strip()
+   if value.isdigit():stats[key+'Mb']=round(int(value)/1024/1024,1)
+  except OSError:pass
+ try:
+  with open('/sys/fs/cgroup/memory.events') as file:
+   events=dict(line.split() for line in file)
+  stats['oomKills']=int(events.get('oom_kill',0))
+ except (OSError,ValueError):pass
+ return stats
 def read_file(name,data):
  name=name.lower()
  if len(data)>8*1024*1024:raise ValueError('文件不得超过 8 MB。')
@@ -218,7 +232,7 @@ class Handler(BaseHTTPRequestHandler):
   except (BrokenPipeError,ConnectionResetError):pass  # User stopped waiting or closed the page.
  def do_GET(self):
   path=self.path.split('?')[0]
-  if path=='/api/health':return self.send(200,{'status':'ok'})
+  if path=='/api/health':return self.send(200,{'status':'ok',**(memory_stats() if 'stats=1' in self.path else {})})
   if path=='/api/config':return self.send(200,{'visionConfigured':True,'visionMode':'local-ocr','maxJdImages':10})
   if path=='/':path='/index.html'
   if path not in ('/index.html','/app.js','/style.css'):return self.send(404,{'error':'Not found'})
