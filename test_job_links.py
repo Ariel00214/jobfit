@@ -96,7 +96,7 @@ class LinkTests(unittest.TestCase):
         try: self.assertEqual(links.read_job(url)['readStatus'], 'busy')
         finally: links._SLOT.release()
         proc = Mock(); proc.pid = 999999; proc.communicate.side_effect = [subprocess.TimeoutExpired('test', 24), ('', '')]
-        with patch.object(links.subprocess, 'Popen', return_value=proc), patch('os.killpg'):
+        with patch.object(links.subprocess, 'Popen', return_value=proc), patch('os.killpg', create=True):
             result = links.read_job(url)
         self.assertEqual(result['readStatus'], 'timeout')
         self.assertEqual(result['sourceUrl'], url)

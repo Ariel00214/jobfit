@@ -46,7 +46,10 @@ def main():
     with tempfile.TemporaryDirectory() as folder:
         resume = Path(folder)/'resume.txt'; resume.write_text(RESUME)
         image = Image.new('RGB', (1000, 600), 'white'); draw = ImageDraw.Draw(image)
-        font = ImageFont.truetype('DejaVuSans.ttf', 30)
+        try: font = ImageFont.truetype('DejaVuSans.ttf', 30)
+        except OSError:
+            try: font = ImageFont.truetype('C:/Windows/Fonts/arial.ttf', 30)
+            except OSError: font = ImageFont.load_default(size=30)
         for i, line in enumerate(['AI Product Manager', 'Company: Example Technology',
                                   'Responsibilities: product design and user research.',
                                   'Manage requirements and coordinate development.',

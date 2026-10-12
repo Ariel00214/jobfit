@@ -87,6 +87,27 @@ def optimize_ocr_image(data):
   return np.asarray(image.convert('RGB'))
  except ValueError:raise
  except Exception as exc:raise ValueError('图片格式无法读取，请改用清晰的 JPG 或 PNG 截图。') from exc
+def ocr_tiles(data):
+ """Bound the pixels and text density passed to each OCR inference."""
+ from PIL import Image,ImageOps
+ import numpy as np
+ try:
+  with Image.open(io.BytesIO(data)) as source:
+   if source.width*source.height>80000000:raise ValueError('截图像素过大，请先裁剪后上传。')
+   orientation=source.getexif().get(274,1)
+   image=ImageOps.exif_transpose(source) if orientation!=1 else source
+   scale=min(1,1200/image.width)
+   source_height=max(1,int(900/scale));overlap=max(1,int(80/scale))
+   top=0
+   while top<image.height:
+    bottom=min(image.height,top+source_height)
+    tile=image.crop((0,top,image.width,bottom))
+    if scale<1:tile=tile.resize((max(1,round(tile.width*scale)),max(1,round(tile.height*scale))),Image.Resampling.LANCZOS)
+    yield np.asarray(tile.convert('RGB'))
+    if bottom==image.height:break
+    top=bottom-overlap
+ except ValueError:raise
+ except Exception as exc:raise ValueError('图片格式无法读取，请改用清晰的 JPG 或 PNG 截图。') from exc
 def merge_adjacent_ocr(previous,current):
  """Remove only exact line overlap at adjacent slice boundaries."""
  left=[x.strip() for x in previous.splitlines() if x.strip()]
@@ -100,7 +121,7 @@ def merge_adjacent_ocr(previous,current):
 def vision(images):
  """Run fully local OCR for ordered slices from one to ten JD screenshots."""
  if not isinstance(images,list) or not 1<=len(images)<=60:raise ValueError('请选择 1～10 张岗位截图。')
- started=time.perf_counter();decode_ms=prepare_ms=run_ms=0;total=0;grouped={}
+ started=time.perf_counter();decode_ms=prepare_ms=run_ms=0;total=0;grouped={};tile_count=0
  try:
   ocr=ocr_engine()
   ordered=sorted(enumerate(images),key=lambda pair:(int(pair[1].get('imageIndex',pair[0])),int(pair[1].get('partIndex',0))))
@@ -115,16 +136,21 @@ def vision(images):
    if len(data)>12*1024*1024:raise ValueError('单个图片分片不得超过 12 MB。')
    total+=len(data)
    if total>32*1024*1024:raise ValueError('全部截图合计不得超过 32 MB。')
-   tick=time.perf_counter();prepared=optimize_ocr_image(data);prepare_ms+=(time.perf_counter()-tick)*1000
-   tick=time.perf_counter()
-   with _OCR_RUN_LOCK:text='\n'.join(_ocr_lines(ocr(prepared))).strip()
-   run_ms+=(time.perf_counter()-tick)*1000
+   text='';tick=time.perf_counter()
+   for prepared in ocr_tiles(data):
+    prepare_ms+=(time.perf_counter()-tick)*1000;tile_count+=1
+    tick=time.perf_counter()
+    with _OCR_RUN_LOCK:piece='\n'.join(_ocr_lines(ocr(prepared))).strip()
+    run_ms+=(time.perf_counter()-tick)*1000
+    del prepared
+    if piece:text=merge_adjacent_ocr(text,piece)
+    tick=time.perf_counter()
    if text:grouped[image_index]=merge_adjacent_ocr(grouped.get(image_index,''),text)
  except ValueError:raise
  except Exception as exc:raise ValueError('本地 OCR 处理失败，请稍后重试或上传更清晰的截图。') from exc
  content='\n\n'.join('【截图 '+str(index+1)+'】\n'+grouped[index] for index in sorted(grouped))
  total_ms=(time.perf_counter()-started)*1000
- print(f'[OCR] images={len(image_indexes)} parts={len(images)} decode={decode_ms:.0f}ms prepare={prepare_ms:.0f}ms run={run_ms:.0f}ms total={total_ms:.0f}ms',flush=True)
+ print(f'[OCR] images={len(image_indexes)} parts={len(images)} tiles={tile_count} decode={decode_ms:.0f}ms prepare={prepare_ms:.0f}ms run={run_ms:.0f}ms total={total_ms:.0f}ms',flush=True)
  if len(re.sub(r'\s+','',content))<30:raise ValueError('这张截图没有识别到足够的 JD 文字，请尝试上传更清晰的截图。')
  return content
 

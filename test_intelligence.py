@@ -1,7 +1,8 @@
-import os,sys,unittest,io
+import os,sys,unittest,io,base64
+from unittest.mock import patch
 sys.path.insert(0,os.path.dirname(__file__))
 from intelligence import parse_resume,parse_jd,analyze,action_plan
-from server import full_analysis,image_mime,optimize_ocr_image,merge_adjacent_ocr
+from server import full_analysis,image_mime,optimize_ocr_image,ocr_tiles,vision,merge_adjacent_ocr
 from engine import parse_jd as parse_legacy_jd
 
 RESUME='''张三 产品运营 2021.01-2024.01 某科技公司
@@ -37,6 +38,11 @@ class JobFitTests(unittest.TestCase):
  def test_ocr_identity(self):
   text='''【截图 1】\n星河科技有限公司\nAI产品经理\n负责用户研究、需求分析与产品上线\n任职要求：三年以上产品经验'''
   current=parse_jd(text,'image');legacy=parse_legacy_jd(text,'image');self.assertEqual(current['jobTitle'],'AI产品经理');self.assertEqual(current['company'],'星河科技有限公司');self.assertEqual(legacy['jobTitle'],'AI产品经理');self.assertEqual(legacy['company'],'星河科技有限公司')
+ def test_screenshot_company_and_unlabelled_role(self):
+  text='''【截图 1】\n01Oct.2026\n浙江连信科技有限公司正在招聘\n内容增长（AI内容方向)\n杭州/12-20K/3-5年/本科\n职位详情\n负责内容策略与社媒运营。\n任职要求：熟悉小红书及抖音。'''
+  parsed=parse_legacy_jd(text,'image')
+  self.assertEqual(parsed['jobTitle'],'内容增长（AI内容方向)')
+  self.assertEqual(parsed['company'],'浙江连信科技有限公司')
  def test_ambiguous_identity_keeps_fallback(self):
   text='''招聘信息\n负责产品需求分析和运营工作\n待遇从优\n期待你的加入''';current=parse_jd(text,'image');legacy=parse_legacy_jd(text,'image');self.assertEqual(current['jobTitle'],'未命名岗位');self.assertEqual(current['company'],'');self.assertEqual(legacy['jobTitle'],'未命名岗位');self.assertEqual(legacy['company'],'')
  def test_mobile_image_mime_fallback(self):
@@ -52,6 +58,21 @@ class JobFitTests(unittest.TestCase):
   wide=io.BytesIO();Image.new('RGB',(3000,4500),'white').save(wide,'JPEG')
   bounded=optimize_ocr_image(wide.getvalue())
   self.assertEqual(bounded.shape[:2],(3000,2000))
+ def test_long_screenshot_ocr_uses_bounded_tiles(self):
+  from PIL import Image
+  source=io.BytesIO();Image.new('RGB',(1134,5367),'white').save(source,'JPEG')
+  shapes=[tile.shape[:2] for tile in ocr_tiles(source.getvalue())]
+  self.assertGreaterEqual(len(shapes),6)
+  self.assertTrue(all(height<=900 and width<=1200 for height,width in shapes))
+  class FakeOCR:
+   def __call__(self,image):
+    self_shapes.append(image.shape[:2])
+    return [('box',('招聘岗位：内容增长，负责制定内容策略、运营渠道、分析用户增长数据并持续优化转化。',1))]
+  self_shapes=[]
+  with patch('server.ocr_engine',return_value=FakeOCR()):
+   content=vision([{'name':'long.jpg','mime':'image/jpeg','data':base64.b64encode(source.getvalue()).decode()}])
+  self.assertIn('内容增长',content)
+  self.assertEqual(self_shapes,shapes)
  def test_slice_overlap_dedup_is_boundary_only(self):
   previous='负责 AI 产品设计\n参与需求分析\n完成产品上线'
   current='参与需求分析\n完成产品上线\n负责数据复盘'

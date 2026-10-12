@@ -64,6 +64,17 @@ def infer_job_identity(text,ls):
  cleaned=[re.sub(r'^(?:【截图\s*\d+】|页面标题\s*[:：])\s*','',x).strip() for x in ls[:60]]
  cleaned=[x for x in cleaned if x and not re.search(r'岗位职责|工作职责|任职要求|职位描述|岗位要求|薪资|福利|收藏|投递|沟通',x)]
  title='';company=''
+ # Screenshot headers often put "公司正在招聘" immediately above an unlabelled
+ # role name. Keep that visible pairing instead of selecting a shorter word
+ # such as "运营" from the responsibilities farther down the image.
+ for index,line in enumerate(cleaned[:12]):
+  header=re.fullmatch(r'(.{4,50}?(?:有限责任公司|股份有限公司|有限公司|集团))\s*(?:正在招聘|招聘中)',line)
+  if header:
+   company=header.group(1)
+   if index+1<len(cleaned):
+    candidate=cleaned[index+1]
+    if 2<=len(candidate)<=60 and not re.search(r'职位详情|岗位职责|工作职责|任职要求|负责|要求|经验',candidate):title=candidate
+   break
  labelled=re.search(r'(?:职位名称|岗位名称|招聘职位|职位|岗位)\s*[:：]\s*([^\n；;]{2,50})',text)
  if labelled:title=labelled.group(1).strip()
  if not title:
