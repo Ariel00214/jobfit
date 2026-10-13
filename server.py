@@ -275,6 +275,8 @@ class Handler(BaseHTTPRequestHandler):
     return self.send(200,{'text':text})
    if self.path=='/api/ocr-slice':
     return self.send(200,{'text':recognize_slice(body.get('image') or {})})
+   if self.path=='/api/jobs/parse-url':
+    return self.send(200,read_job(body.get('url','')))
    if self.path=='/api/parse-jd':
     source=body.get('source')
     source_url=body.get('url') or body.get('sourceUrl','')
@@ -301,7 +303,15 @@ class Handler(BaseHTTPRequestHandler):
      name=image.get('originalName') or image.get('name','截图')
      if name not in source_names:source_names.append(name)
     metadata={'jdId':jd_id,'sourceUrl':source_url,'sourcePlatform':platform_for(source_url) or ('岗位截图' if source=='image' else '手动 JD'),'sourceImage':source_names}
-    return self.send(200,{'readStatus':'success','method':reading.get('method') if source=='url' else source,'jd':parse_jd(content,source,source_url,metadata)})
+    jd=parse_jd(content,source,source_url,metadata)
+    if source=='url':
+     jd.update({key:reading.get(key,jd.get(key,'')) for key in ('platform','canonicalUrl','jobId','company','salary','location')})
+     if reading.get('title'):jd['jobTitle']=reading['title']
+     jd['rawJD']=reading.get('rawJD') or content;jd['jobDescription']=jd['rawJD'];jd['extraction']=reading.get('extraction',{})
+    else:
+     jd['platform']=({'岗位截图':'ocr','手动 JD':'manual'}.get(metadata['sourcePlatform']) or 'unsupported')
+     jd['canonicalUrl']=source_url;jd['jobId']='';jd['extraction']={'method':source,'status':'complete','identityVerified':source!='url','retrievedAt':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'sourceUrls':[source_url] if source_url else []}
+    return self.send(200,{'readStatus':'success','method':reading.get('method') if source=='url' else source,'jd':jd})
    if self.path=='/api/analyze':
     resume=body.get('resume','');jds=body.get('jds',[])
     if len(resume.strip())<40:raise ValueError('请先上传简历。')

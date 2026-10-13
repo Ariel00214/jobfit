@@ -11,4 +11,8 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.7
+      # Optional. When absent, URL parsing skips web search and continues with
+      # Playwright / OCR / manual text without preventing service startup.
+      - key: BRAVE_SEARCH_API_KEY
+        sync: false
 
