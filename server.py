@@ -305,7 +305,7 @@ class Handler(BaseHTTPRequestHandler):
   if path=='/':path='/index.html'
   if path not in ('/index.html','/app.js','/style.css'):return self.send(404,{'error':'Not found'})
   with open(os.path.join(ROOT,'static',path[1:]),'rb') as f:data=f.read()
-  self.send_response(200);self.send_header('Content-Type',{'html':'text/html; charset=utf-8','js':'text/javascript; charset=utf-8','css':'text/css; charset=utf-8'}[path.rsplit('.',1)[1]]);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+  self.send_response(200);self.send_header('Content-Type',{'html':'text/html; charset=utf-8','js':'text/javascript; charset=utf-8','css':'text/css; charset=utf-8'}[path.rsplit('.',1)[1]]);self.send_header('Cache-Control','no-cache, must-revalidate');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
  def do_POST(self):
   try:
    length=int(self.headers.get('Content-Length','0'))
