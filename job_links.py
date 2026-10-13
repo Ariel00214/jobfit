@@ -9,14 +9,21 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, unquote, urljoin, urlparse, urlunparse
 
 PLATFORMS = {'zhipin.com': 'BOSS直聘', 'zhaopin.com': '智联招聘',
              'liepin.com': '猎聘', '51job.com': '前程无忧',
              'lagou.com': '拉勾', 'kanzhun.com': '看准'}
 LIMIT = 24
 _SLOT = threading.BoundedSemaphore(1)
+_CACHE = {}
+_CACHE_LOCK = threading.Lock()
+SUCCESS_TTL = 6 * 60 * 60
+FAILURE_TTL = 2 * 60
+TRACKING_PARAMS = {'from', 'source', 'src', 'spm', 'track', 'tracking', 'ref', 'refer',
+                   'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'}
 BLOCKED = re.compile(r'安全验证|访问验证|滑动验证|验证码|请登录后|security verification|captcha', re.I)
 EXPIRED = re.compile(r'职位已(?:关闭|下架|失效)|岗位已(?:关闭|下架|失效)|该职位不存在|职位不存在|job expired', re.I)
 TERMS = re.compile(r'职位(?:描述|介绍|要求)|岗位(?:职责|要求)|任职要求|工作职责|responsibilit|requirement', re.I)
@@ -28,6 +35,7 @@ MESSAGES = {
     'unavailable': '暂未读取到完整岗位，请上传截图或粘贴正文。',
     'invalid_url': '请粘贴一个有效的 http/https 岗位链接。',
     'multiple_urls': '检测到多个链接，请每次添加一个岗位。',
+    'unsupported_platform': '暂不支持该招聘平台，请上传岗位截图或粘贴正文。',
 }
 
 
@@ -37,8 +45,38 @@ def platform_for(url):
                  if host == d or host.endswith('.' + d)), '招聘平台' if url else '')
 
 
+def platform_code(url):
+    return {'BOSS直聘': 'boss', '智联招聘': 'zhaopin', '猎聘': 'liepin',
+            '前程无忧': '51job', '拉勾': 'lagou', '看准': 'kanzhun'}.get(platform_for(url), 'unsupported')
+
+
+def job_id_for(url):
+    """Return only IDs evidenced by known platform URL shapes."""
+    parsed = urlparse(url); path = unquote(parsed.path)
+    patterns = {
+        'boss': (r'/job_detail/([A-Za-z0-9_-]+)\.html', r'/job/([A-Za-z0-9_-]+)', r'/weijd-job/([A-Za-z0-9_-]+)'),
+        'zhaopin': (r'/jobs/(?:detail/)?([A-Za-z0-9_-]+)', r'/jobdetail/([A-Za-z0-9_-]+)'),
+        'liepin': (r'/job/([A-Za-z0-9_-]+)(?:\.shtml)?', r'/a/([A-Za-z0-9_-]+)'),
+    }
+    for pattern in patterns.get(platform_code(url), ()):
+        match = re.search(pattern, path, re.I)
+        if match: return match.group(1)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    for key in ('jobId', 'jobid', 'positionId', 'positionid'):
+        if query.get(key): return query[key]
+    return ''
+
+
+def canonicalize_url(url):
+    parsed = urlparse(url)
+    query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+             if key.lower() not in TRACKING_PARAMS and not key.lower().startswith('utm_')]
+    path = re.sub(r'/{2,}', '/', parsed.path or '/')
+    return urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), path, '', urlencode(query), ''))
+
+
 def normalize_url(value):
-    value = html.unescape(str(value or '').replace('\\&', '&')).strip()
+    value = html.unescape(unquote(str(value or '').replace('\\&', '&'))).strip()
     urls = list(dict.fromkeys(re.findall(r'https?://[^\s<>"\u3000]+', value, re.I)))
     urls = [u.rstrip('。，；、！？）】」』)>]') for u in urls]
     if len(urls) > 1:
@@ -51,7 +89,7 @@ def normalize_url(value):
         raise ValueError('invalid_url')
     if len(url) > 4096:
         raise ValueError('invalid_url')
-    return url
+    return canonicalize_url(url)
 
 
 def safe_url(url):
@@ -246,18 +284,87 @@ def browser_html(url, deadline):
         finally: browser.close()
 
 
+def content_fields(content):
+    def field(label):
+        match = re.search(r'^' + label + r'[：:]\s*(.+)$', content, re.M)
+        return match.group(1).strip() if match else ''
+    return {'title': field('职位名称'), 'company': field('公司名称'),
+            'location': field('工作地点'), 'salary': field('薪资(?:范围)?')}
+
+
+def normalized_result(url, resolved, content, method, source_urls=None):
+    if platform_code(resolved or url) != platform_code(url): raise ValueError('unavailable')
+    original_id, resolved_id = job_id_for(url), job_id_for(resolved or url)
+    if original_id and resolved_id and original_id != resolved_id: raise ValueError('unavailable')
+    fields = content_fields(content)
+    raw = re.sub(r'^(?:职位名称|公司名称|工作地点|薪资(?:范围)?|来源平台)[：:].*$\n?', '', content,
+                 flags=re.M).strip()
+    return {
+        'platform': platform_code(url), 'sourceUrl': url, 'canonicalUrl': canonicalize_url(resolved or url),
+        'resolvedUrl': resolved or url, 'jobId': resolved_id or original_id,
+        **fields, 'responsibilities': '', 'requirements': '', 'rawJD': raw or content,
+        'content': content, 'method': method, 'readStatus': 'success', 'needsSupplement': False,
+        'extraction': {'method': method, 'status': 'complete', 'identityVerified': True,
+                       'retrievedAt': datetime.now(timezone.utc).isoformat(),
+                       'sourceUrls': list(dict.fromkeys(source_urls or [resolved or url]))},
+    }
+
+
+def search_candidates(url, deadline):
+    """Use an optional official search API; absence is a normal degraded state."""
+    key = os.environ.get('BRAVE_SEARCH_API_KEY', '').strip()
+    if not key: return []
+    import requests
+    job_id = job_id_for(url); platform = platform_for(url)
+    queries = [f'"{url}"']
+    if job_id: queries.append(f'"{job_id}" "{platform}"')
+    found = []
+    for query in queries[:2]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0: break
+        response = requests.get('https://api.search.brave.com/res/v1/web/search',
+                                params={'q': query, 'count': 5},
+                                headers={'Accept': 'application/json', 'X-Subscription-Token': key},
+                                timeout=(min(2, remaining), min(4, remaining)))
+        if response.status_code != 200: continue
+        for item in response.json().get('web', {}).get('results', []):
+            candidate = item.get('url', '')
+            try: candidate = canonicalize_url(safe_url(candidate))
+            except Exception: continue
+            if platform_code(candidate) != platform_code(url): continue
+            candidate_id = job_id_for(candidate)
+            if job_id and candidate_id and candidate_id != job_id: continue
+            if job_id and candidate_id == job_id: found.append(candidate)
+            elif candidate == canonicalize_url(url): found.append(candidate)
+    return list(dict.fromkeys(found))[:3]
+
+
+def search_fallback(url, deadline):
+    for candidate in search_candidates(url, deadline):
+        try:
+            source, resolved = fetch_html(candidate, deadline)
+            content = extract(source, resolved)
+            return normalized_result(url, resolved, content, 'search', [url, candidate, resolved])
+        except Exception:
+            continue
+    raise ValueError('unavailable')
+
+
 def worker(url):
     deadline = time.monotonic() + LIMIT - 2
     reasons = []
     try:
         source, resolved = fetch_html(url, deadline)
-        return {'content': extract(source, resolved), 'resolvedUrl': resolved, 'method': 'html'}
+        return normalized_result(url, resolved, extract(source, resolved), 'http')
     except Exception as exc: reasons.append(str(exc))
     if 'expired' in reasons: raise ValueError('expired')
+    try:
+        return search_fallback(url, deadline - 10)
+    except Exception as exc: reasons.append(str(exc))
     # A public render uses no user account, cookies, or credentials.
     try:
         content, resolved = browser_html(url, deadline - 5)
-        return {'content': content, 'resolvedUrl': resolved, 'method': 'browser'}
+        return normalized_result(url, resolved, content, 'browser')
     except Exception as exc: reasons.append(str(exc))
     # Preserve the existing public URL reader, with the same strict extraction.
     # Only the public job URL goes to this service, never a resume or credentials.
@@ -273,8 +380,8 @@ def worker(url):
                 if response.status_code != 200: raise ValueError('unavailable')
                 raw = response.raw.read(2*1024*1024+1, decode_content=True)
                 if len(raw) > 2*1024*1024: raise ValueError('unavailable')
-                return {'content': extract(raw.decode('utf-8', errors='replace'), url),
-                        'resolvedUrl': url, 'method': 'reader'}
+                content = extract(raw.decode('utf-8', errors='replace'), url)
+                return normalized_result(url, url, content, 'reader')
         except Exception as exc: reasons.append(str(exc))
     raise ValueError('blocked' if 'blocked' in reasons else 'timeout' if time.monotonic() >= deadline else 'unavailable')
 
@@ -282,7 +389,13 @@ def worker(url):
 def read_job(value):
     try: url = normalize_url(value)
     except ValueError as exc: return failure(str(exc))
+    if platform_code(url) == 'unsupported': return failure('unsupported_platform', url)
     if listing_url(url): return failure('unavailable', url)
+    cache_key = f'{platform_code(url)}:{job_id_for(url) or canonicalize_url(url)}'
+    with _CACHE_LOCK:
+        cached = _CACHE.get(cache_key)
+        if cached and cached[0] > time.monotonic(): return {**cached[1], 'cacheHit': True}
+        if cached: _CACHE.pop(cache_key, None)
     if not _SLOT.acquire(blocking=False): return failure('busy', url)
     try:
         # Isolate DNS, network and rendering together so a slow stage cannot exceed the total budget.
@@ -307,14 +420,22 @@ def read_job(value):
                 except ProcessLookupError: pass
             elif proc.poll() is None: proc.kill()
             proc.wait()
-        return {**result, 'sourceUrl': url, 'sourcePlatform': platform_for(url)}
+        result = {**result, 'sourceUrl': url, 'sourcePlatform': platform_for(url)}
+        ttl = FAILURE_TTL if result.get('needsSupplement') else SUCCESS_TTL
+        with _CACHE_LOCK: _CACHE[cache_key] = (time.monotonic() + ttl, result)
+        return result
     finally: _SLOT.release()
 
 
 def failure(reason, url=''):
     reason = reason if reason in MESSAGES else 'unavailable'
     return {'needsSupplement': True, 'readStatus': reason, 'sourceUrl': url,
-            'sourcePlatform': platform_for(url), 'message': MESSAGES[reason]}
+            'sourcePlatform': platform_for(url), 'platform': platform_code(url),
+            'canonicalUrl': canonicalize_url(url) if url else '', 'jobId': job_id_for(url) if url else '',
+            'extraction': {'method': '', 'status': reason if reason in ('blocked', 'expired') else 'failed',
+                           'identityVerified': False, 'retrievedAt': datetime.now(timezone.utc).isoformat(),
+                           'sourceUrls': [url] if url else []},
+            'message': MESSAGES[reason]}
 
 
 if __name__ == '__main__':

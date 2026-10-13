@@ -38,6 +38,45 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(links.platform_for('https://m.liepin.com/job/123.shtml'), '猎聘')
         self.assertEqual(links.platform_for('https://zhipin.com.attacker.example/a'), '招聘平台')
 
+    def test_canonical_url_job_id_and_tracking_cleanup(self):
+        raw = '岗位：https%3A%2F%2Fwww.zhipin.com%2Fjob_detail%2Fabc123.html%3Futm_source%3Dshare%26sid%3Dkeep。'
+        url = links.normalize_url(raw)
+        self.assertEqual(url, 'https://www.zhipin.com/job_detail/abc123.html?sid=keep')
+        self.assertEqual(links.platform_code(url), 'boss')
+        self.assertEqual(links.job_id_for(url), 'abc123')
+
+    def test_normalized_result_preserves_raw_jd_and_provenance(self):
+        content = '职位名称：AI产品经理\n公司名称：测试公司\n来源平台：BOSS直聘\n' + DESCRIPTION
+        result = links.normalized_result('https://www.zhipin.com/job_detail/abc.html',
+                                         'https://www.zhipin.com/job_detail/abc.html', content, 'http')
+        self.assertEqual(result['platform'], 'boss')
+        self.assertEqual(result['jobId'], 'abc')
+        self.assertTrue(result['extraction']['identityVerified'])
+        self.assertIn('任职要求', result['rawJD'])
+        self.assertNotIn('来源平台：', result['rawJD'])
+        with self.assertRaisesRegex(ValueError, 'unavailable'):
+            links.normalized_result('https://www.zhipin.com/job_detail/abc.html',
+                                    'https://www.zhipin.com/job_detail/other.html', content, 'http')
+
+    def test_search_rejects_conflicting_job_id(self):
+        response = Mock(status_code=200)
+        response.json.return_value = {'web': {'results': [
+            {'url': 'https://www.zhipin.com/job_detail/wrong.html'},
+            {'url': 'https://www.zhipin.com/job_detail/abc.html'},
+        ]}}
+        with patch.dict(links.os.environ, {'BRAVE_SEARCH_API_KEY': 'secret'}), \
+             patch.object(links, 'safe_url', side_effect=lambda value: value), \
+             patch('requests.get', return_value=response):
+            found = links.search_candidates('https://www.zhipin.com/job_detail/abc.html', links.time.monotonic()+5)
+        self.assertEqual(found, ['https://www.zhipin.com/job_detail/abc.html'])
+
+    def test_unsupported_platform_degrades_without_worker(self):
+        with patch('job_links.subprocess.Popen') as process:
+            result = links.read_job('https://jobs.example.com/job/123')
+        process.assert_not_called()
+        self.assertEqual(result['readStatus'], 'unsupported_platform')
+        self.assertTrue(result['needsSupplement'])
+
     def test_invalid_or_multiple_urls(self):
         for value in ('没有链接', 'javascript:alert(1)', 'https://u:p@example.com/a'):
             self.assertEqual(links.read_job(value)['readStatus'], 'invalid_url')
