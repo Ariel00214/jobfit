@@ -2,7 +2,7 @@ import os,sys,unittest,io,base64
 from unittest.mock import patch
 sys.path.insert(0,os.path.dirname(__file__))
 from intelligence import parse_resume,parse_jd,analyze,action_plan
-from server import full_analysis,image_mime,optimize_ocr_image,ocr_tiles,vision,recognize_slice,combine_ocr_parts,merge_adjacent_ocr
+from server import full_analysis,image_mime,optimize_ocr_image,ocr_tiles,vision,recognize_slice,combine_ocr_parts,merge_adjacent_ocr,ocr_text_status
 from engine import parse_jd as parse_legacy_jd
 
 RESUME='''张三 产品运营 2021.01-2024.01 某科技公司
@@ -76,7 +76,7 @@ class JobFitTests(unittest.TestCase):
   from PIL import Image
   source=io.BytesIO();Image.new('RGB',(1134,900),'white').save(source,'JPEG')
   with patch('server.isolated_ocr_tile',return_value='浙江连信科技有限公司正在招聘\n内容增长（AI内容方向)\n负责内容策略与用户增长。'):
-   first=recognize_slice({'name':'part1.jpg','mime':'image/jpeg','data':base64.b64encode(source.getvalue()).decode()})
+   first=recognize_slice({'name':'part1.jpg','mime':'image/jpeg','data':base64.b64encode(source.getvalue()).decode()})['text']
   combined=combine_ocr_parts([{'imageIndex':0,'partIndex':0,'totalParts':2,'text':first},{'imageIndex':0,'partIndex':1,'totalParts':2,'text':'任职要求：熟悉内容运营和数据分析。'}])
   parsed=parse_legacy_jd(combined,'image')
   self.assertEqual(parsed['jobTitle'],'内容增长（AI内容方向)')
@@ -100,5 +100,23 @@ class JobFitTests(unittest.TestCase):
   with self.assertRaisesRegex(ValueError,'索引重复'):combine_ocr_parts(duplicate)
   with self.assertRaisesRegex(ValueError,'索引不连续'):
    combine_ocr_parts([{'imageIndex':1,'partIndex':0,'totalParts':1,'text':'岗位名称：产品经理\n岗位职责：负责产品规划与交付。'}])
+ def test_slice_identity_and_coverage_are_verified(self):
+  base={'imageIndex':0,'totalParts':2,'taskId':'task-a','fingerprint':'sha-a','scaledHeight':2200}
+  valid=[{**base,'partIndex':0,'coverageTop':0,'coverageBottom':1200,'text':'岗位名称：产品经理\n岗位职责：负责产品规划与交付。'},
+         {**base,'partIndex':1,'coverageTop':1104,'coverageBottom':2200,'text':'任职要求：具备数据分析能力。'}]
+  self.assertIn('任职要求',combine_ocr_parts(valid))
+  with self.assertRaisesRegex(ValueError,'身份不一致'):
+   combine_ocr_parts([valid[0],{**valid[1],'fingerprint':'sha-other'}])
+  with self.assertRaisesRegex(ValueError,'未覆盖'):
+   combine_ocr_parts([valid[0],{**valid[1],'coverageTop':1300}])
+ def test_ocr_status_distinguishes_failure_review_and_complete(self):
+  self.assertEqual(ocr_text_status('')[0],'failed')
+  self.assertEqual(ocr_text_status('薪资 20K')[0],'needs_review')
+  self.assertEqual(ocr_text_status('岗位职责：负责产品规划。任职要求：具备数据分析能力。')[0],'complete')
+ def test_enhancement_is_opt_in(self):
+  from PIL import Image
+  source=io.BytesIO();Image.new('RGB',(400,300),(210,210,210)).save(source,'PNG')
+  normal=optimize_ocr_image(source.getvalue());enhanced=optimize_ocr_image(source.getvalue(),True)
+  self.assertEqual(normal.shape,(300,400,3));self.assertGreater(enhanced.shape[1],normal.shape[1])
 
 if __name__=='__main__':unittest.main()

@@ -72,15 +72,21 @@ def image_mime(item):
   ext=os.path.splitext(str(item.get('name') or ''))[1].lower()
   mime={'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp'}.get(ext,'')
  return mime
-def optimize_ocr_image(data):
+def optimize_ocr_image(data,enhance=False):
  """Decode and normalize an OCR part without another lossy JPEG round-trip."""
- from PIL import Image,ImageOps
+ from PIL import Image,ImageOps,ImageEnhance
  import numpy as np
  try:
   image=ImageOps.exif_transpose(Image.open(io.BytesIO(data)))
   if image.width*image.height>80000000:raise ValueError('截图像素过大，请先裁剪后上传。')
   if image.width>2000:
    scale=2000/image.width;image=image.resize((2000,max(1,round(image.height*scale))),Image.Resampling.LANCZOS)
+  if enhance:
+   # Only failed slices take this bounded retry path. Preserve normal clear images.
+   image=ImageOps.autocontrast(ImageOps.grayscale(image),cutoff=1)
+   image=ImageEnhance.Contrast(image).enhance(1.25)
+   if image.width<1000:
+    scale=min(1.5,1200/image.width);image=image.resize((round(image.width*scale),round(image.height*scale)),Image.Resampling.LANCZOS)
   return np.asarray(image.convert('RGB'))
  except ValueError:raise
  except Exception as exc:raise ValueError('图片格式无法读取，请改用清晰的 JPG 或 PNG 截图。') from exc
@@ -162,6 +168,17 @@ def merge_adjacent_ocr(previous,current):
   if [normal(x) for x in left[-size:]]==[normal(x) for x in right[:size]]:
    overlap=size;break
  return '\n'.join(left+right[overlap:])
+def ocr_text_status(text):
+ """Content-aware OCR signal; sparse layouts are reviewable, not silently failed."""
+ compact=re.sub(r'\s+','',text or '')
+ if not compact:return 'failed','当前片段未识别到文字，请确认截图清晰且包含岗位内容。'
+ replacement=(text or '').count('\ufffd');printable=sum(ch.isprintable() for ch in text or '')
+ if replacement>max(2,len(compact)//20) or printable<max(1,len(text or '')*.8):
+  return 'failed','当前片段出现明显乱码，请上传原图或更清晰的截图。'
+ jd_markers=('职责','要求','职位','岗位','任职','responsib','requirement','qualification','job')
+ if len(compact)<18 or not any(marker in (text or '').lower() for marker in jd_markers):
+  return 'needs_review','该片段文字较少或版式特殊，识别结果需要人工确认。'
+ return 'complete',''
 def vision(images):
  """Run fully local OCR for ordered slices from one to ten JD screenshots."""
  if not isinstance(images,list) or not 1<=len(images)<=60:raise ValueError('请选择 1～10 张岗位截图。')
@@ -203,16 +220,19 @@ def recognize_slice(item):
  try:data=base64.b64decode(item.get('data',''),validate=True)
  except Exception as exc:raise ValueError('图片数据损坏，请重新选择截图。') from exc
  if len(data)>12*1024*1024:raise ValueError('单个图片分片不得超过 12 MB。')
- started=time.perf_counter();prepared=optimize_ocr_image(data)
+ started=time.perf_counter();enhance=bool(item.get('enhance'));prepared=optimize_ocr_image(data,enhance)
  height,width=prepared.shape[:2]
  if width>OCR_WIDTH or height>OCR_HEIGHT or width*height>OCR_PIXELS:raise ValueError('图片分片尺寸超出安全范围，请重新选择截图。')
+ queued=time.perf_counter()
  with _OCR_RUN_LOCK:piece=isolated_ocr_tile(prepared).strip()
+ queue_ms=(time.perf_counter()-queued)*1000;status,message=ocr_text_status(piece)
  identity=f"{int(item.get('imageIndex',0))+1}:{int(item.get('partIndex',0))+1}/{int(item.get('totalParts',1))}"
- print(f'[OCR] slice={identity} size={width}x{height} total={(time.perf_counter()-started)*1000:.0f}ms memory={memory_stats()}',flush=True)
- return piece
+ duration_ms=(time.perf_counter()-started)*1000
+ print(f'[OCR] slice={identity} enhanced={enhance} status={status} size={width}x{height} queue={queue_ms:.0f}ms total={duration_ms:.0f}ms memory={memory_stats()}',flush=True)
+ return {'text':piece,'status':status,'message':message,'enhanced':enhance,'retries':1 if enhance else 0,'durationMs':round(duration_ms)}
 def combine_ocr_parts(parts):
  if not isinstance(parts,list) or not 1<=len(parts)<=60:raise ValueError('请选择 1～10 张岗位截图。')
- grouped={};indexes=set();received={};expected={}
+ grouped={};indexes=set();received={};expected={};identities={};coverage={}
  for item in sorted(parts,key=lambda p:(int(p.get('imageIndex',0)),int(p.get('partIndex',0)))):
   index=int(item.get('imageIndex',0));part_index=int(item.get('partIndex',0));total_parts=int(item.get('totalParts',1));indexes.add(index)
   if index<0 or index>9 or len(indexes)>10:raise ValueError('请选择 1～10 张岗位截图。')
@@ -221,13 +241,28 @@ def combine_ocr_parts(parts):
   expected[index]=total_parts
   if part_index in received.setdefault(index,set()):raise ValueError('截图分片索引重复，请重新选择截图。')
   received[index].add(part_index)
+  task_id=str(item.get('taskId') or '');fingerprint=str(item.get('fingerprint') or '')
+  if task_id or fingerprint:
+   if not task_id or not fingerprint:raise ValueError('截图分片身份不完整，请重新选择截图。')
+   identity=(task_id,fingerprint)
+   if index in identities and identities[index]!=identity:raise ValueError('截图分片身份不一致，请重新选择截图。')
+   identities[index]=identity
+  if all(key in item for key in ('coverageTop','coverageBottom','scaledHeight')):
+   top=int(item['coverageTop']);bottom=int(item['coverageBottom']);scaled_height=int(item['scaledHeight'])
+   if top<0 or bottom<=top or bottom>scaled_height:raise ValueError('截图分片覆盖范围不正确，请重新选择截图。')
+   coverage.setdefault(index,[]).append((part_index,top,bottom,scaled_height))
   piece=item.get('text','')
   if not isinstance(piece,str) or len(piece)>12000:raise ValueError('截图文字格式不正确。')
   if not piece.strip():raise ValueError('存在未识别成功的截图分片，JD 内容不完整，请重试。')
   grouped[index]=merge_adjacent_ocr(grouped.get(index,''),piece)
  if indexes!=set(range(len(indexes))):raise ValueError('截图索引不连续，JD 内容不完整，请重试。')
  for index in indexes:
-  if received[index]!=set(range(expected[index])):raise ValueError('截图分片缺失，JD 内容不完整，请重试。')
+   if received[index]!=set(range(expected[index])):raise ValueError('截图分片缺失，JD 内容不完整，请重试。')
+   if index in coverage:
+    spans=sorted(coverage[index]);height=spans[0][3]
+    if spans[0][1]!=0 or spans[-1][2]!=height or any(span[3]!=height for span in spans):raise ValueError('截图分片覆盖不完整，请重新选择截图。')
+    for previous,current in zip(spans,spans[1:]):
+     if current[1]>previous[2]:raise ValueError('截图分片之间存在未覆盖区域，JD 内容不完整，请重试。')
  content='\n\n'.join('【截图 '+str(index+1)+'】\n'+grouped[index] for index in sorted(grouped))
  if len(re.sub(r'\s+','',content))<30:raise ValueError('这张截图没有识别到足够的 JD 文字，请尝试上传更清晰的截图。')
  return content
@@ -274,7 +309,7 @@ class Handler(BaseHTTPRequestHandler):
     if len(text.strip())<40:raise ValueError('简历没有提取到足够文字，请使用文字版文件。')
     return self.send(200,{'text':text})
    if self.path=='/api/ocr-slice':
-    return self.send(200,{'text':recognize_slice(body.get('image') or {})})
+    return self.send(200,recognize_slice(body.get('image') or {}))
    if self.path=='/api/jobs/parse-url':
     return self.send(200,read_job(body.get('url','')))
    if self.path=='/api/parse-jd':
@@ -310,7 +345,9 @@ class Handler(BaseHTTPRequestHandler):
      jd['rawJD']=reading.get('rawJD') or content;jd['jobDescription']=jd['rawJD'];jd['extraction']=reading.get('extraction',{})
     else:
      jd['platform']=({'岗位截图':'ocr','手动 JD':'manual'}.get(metadata['sourcePlatform']) or 'unsupported')
-     jd['canonicalUrl']=source_url;jd['jobId']='';jd['extraction']={'method':source,'status':'complete','identityVerified':source!='url','retrievedAt':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'sourceUrls':[source_url] if source_url else []}
+     status,message=ocr_text_status(content) if source=='image' else ('complete','')
+     if source=='image' and any(part.get('status')=='needs_review' for part in body.get('ocrParts',[])):status='needs_review'
+     jd['canonicalUrl']=source_url;jd['jobId']='';jd['extraction']={'method':source,'status':status,'message':message,'identityVerified':source!='url','retrievedAt':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'sourceUrls':[source_url] if source_url else []}
     return self.send(200,{'readStatus':'success','method':reading.get('method') if source=='url' else source,'jd':jd})
    if self.path=='/api/analyze':
     resume=body.get('resume','');jds=body.get('jds',[])
@@ -321,6 +358,7 @@ class Handler(BaseHTTPRequestHandler):
   except OcrTimeoutError as e:return self.send(504,{'error':str(e),'code':'ocr_timeout','retryable':True})
   except OcrTemporaryError as e:return self.send(503,{'error':str(e),'code':'ocr_worker_unavailable','retryable':True})
   except ValueError as e:return self.send(400,{'error':str(e),'code':'invalid_input','retryable':False})
+  except (BrokenPipeError,ConnectionResetError,ConnectionAbortedError):return
   except Exception as e:
    print(f'[ERROR] {self.path}: {type(e).__name__}: {e}',flush=True)
    return self.send(500,{'error':'处理失败，请检查文件或重试。','code':'server_error','retryable':True})
