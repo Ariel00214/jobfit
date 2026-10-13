@@ -142,5 +142,16 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(result['sourcePlatform'], 'BOSS直聘')
         self.assertTrue(result['needsSupplement'])
 
+    def test_worker_failure_retains_platform_and_job_identity(self):
+        url = 'https://www.zhaopin.com/jobdetail/CCL1501502560J40886420814.htm'
+        proc = Mock(); proc.pid = 999999
+        proc.communicate.return_value = (json.dumps(links.failure('unavailable')), '')
+        with patch.object(links.subprocess, 'Popen', return_value=proc), patch('os.killpg', create=True):
+            result = links.read_job(url)
+        self.assertEqual(result['sourceUrl'], url)
+        self.assertEqual(result['platform'], 'zhaopin')
+        self.assertEqual(result['jobId'], 'CCL1501502560J40886420814')
+        self.assertEqual(result['extraction']['sourceUrls'], [url])
+
 
 if __name__ == '__main__': unittest.main()

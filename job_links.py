@@ -420,7 +420,12 @@ def read_job(value):
                 except ProcessLookupError: pass
             elif proc.poll() is None: proc.kill()
             proc.wait()
-        result = {**result, 'sourceUrl': url, 'sourcePlatform': platform_for(url)}
+        if result.get('needsSupplement'):
+            # Worker failures have no input URL. Rebuild their provenance in
+            # the parent so a failed known-platform link remains identifiable.
+            result = failure(result.get('readStatus', 'unavailable'), url)
+        else:
+            result = {**result, 'sourceUrl': url, 'sourcePlatform': platform_for(url)}
         ttl = FAILURE_TTL if result.get('needsSupplement') else SUCCESS_TTL
         with _CACHE_LOCK: _CACHE[cache_key] = (time.monotonic() + ttl, result)
         return result
