@@ -179,6 +179,11 @@ def ocr_text_status(text):
  if len(compact)<18 or not any(marker in (text or '').lower() for marker in jd_markers):
   return 'needs_review','该片段文字较少或版式特殊，识别结果需要人工确认。'
  return 'complete',''
+def image_is_visually_blank(prepared):
+ """Conservatively distinguish a genuinely blank tile from missed visible text."""
+ import numpy as np
+ gray=prepared.mean(axis=2)
+ return float(np.std(gray))<3 and float(np.mean(gray<225))<0.0002
 def vision(images):
  """Run fully local OCR for ordered slices from one to ten JD screenshots."""
  if not isinstance(images,list) or not 1<=len(images)<=60:raise ValueError('请选择 1～10 张岗位截图。')
@@ -226,6 +231,7 @@ def recognize_slice(item):
  queued=time.perf_counter()
  with _OCR_RUN_LOCK:piece=isolated_ocr_tile(prepared).strip()
  queue_ms=(time.perf_counter()-queued)*1000;status,message=ocr_text_status(piece)
+ if status=='failed' and image_is_visually_blank(prepared):status,message='blank','该区域经图像检查为空白，已记录覆盖但不生成文字。'
  identity=f"{int(item.get('imageIndex',0))+1}:{int(item.get('partIndex',0))+1}/{int(item.get('totalParts',1))}"
  duration_ms=(time.perf_counter()-started)*1000
  print(f'[OCR] slice={identity} enhanced={enhance} status={status} size={width}x{height} queue={queue_ms:.0f}ms total={duration_ms:.0f}ms memory={memory_stats()}',flush=True)
@@ -253,8 +259,9 @@ def combine_ocr_parts(parts):
    coverage.setdefault(index,[]).append((part_index,top,bottom,scaled_height))
   piece=item.get('text','')
   if not isinstance(piece,str) or len(piece)>12000:raise ValueError('截图文字格式不正确。')
-  if not piece.strip():raise ValueError('存在未识别成功的截图分片，JD 内容不完整，请重试。')
-  grouped[index]=merge_adjacent_ocr(grouped.get(index,''),piece)
+  if not piece.strip() and item.get('status')!='blank':raise ValueError('存在未识别成功的截图分片，JD 内容不完整，请重试。')
+  if piece.strip():grouped[index]=merge_adjacent_ocr(grouped.get(index,''),piece)
+  else:grouped.setdefault(index,'')
  if indexes!=set(range(len(indexes))):raise ValueError('截图索引不连续，JD 内容不完整，请重试。')
  for index in indexes:
    if received[index]!=set(range(expected[index])):raise ValueError('截图分片缺失，JD 内容不完整，请重试。')

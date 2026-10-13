@@ -2,7 +2,8 @@ import os,sys,unittest,io,base64
 from unittest.mock import patch
 sys.path.insert(0,os.path.dirname(__file__))
 from intelligence import parse_resume,parse_jd,analyze,action_plan
-from server import full_analysis,image_mime,optimize_ocr_image,ocr_tiles,vision,recognize_slice,combine_ocr_parts,merge_adjacent_ocr,ocr_text_status
+from server import full_analysis,image_mime,optimize_ocr_image,ocr_tiles,vision,recognize_slice,combine_ocr_parts,merge_adjacent_ocr,ocr_text_status,image_is_visually_blank
+from ocr_worker import lines as ocr_lines
 from engine import parse_jd as parse_legacy_jd
 
 RESUME='''张三 产品运营 2021.01-2024.01 某科技公司
@@ -118,5 +119,13 @@ class JobFitTests(unittest.TestCase):
   source=io.BytesIO();Image.new('RGB',(400,300),(210,210,210)).save(source,'PNG')
   normal=optimize_ocr_image(source.getvalue());enhanced=optimize_ocr_image(source.getvalue(),True)
   self.assertEqual(normal.shape,(300,400,3));self.assertGreater(enhanced.shape[1],normal.shape[1])
+ def test_blank_slice_is_distinguished_from_missed_text(self):
+  from PIL import Image
+  blank=io.BytesIO();Image.new('RGB',(400,300),'white').save(blank,'PNG')
+  prepared=optimize_ocr_image(blank.getvalue());self.assertTrue(image_is_visually_blank(prepared))
+  parts=[{'imageIndex':0,'partIndex':0,'totalParts':2,'status':'complete','text':'岗位名称：产品经理\n岗位职责：负责产品规划、用户研究与项目交付。\n任职要求：具备数据分析和沟通能力。'},
+         {'imageIndex':0,'partIndex':1,'totalParts':2,'status':'blank','text':''}]
+  self.assertIn('岗位职责',combine_ocr_parts(parts))
+  self.assertEqual(ocr_lines(type('EmptyResult',(),{'txts':None})()),[])
 
 if __name__=='__main__':unittest.main()

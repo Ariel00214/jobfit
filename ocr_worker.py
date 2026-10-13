@@ -10,7 +10,7 @@ def lines(result):
     if result is None:
         return []
     if hasattr(result, 'txts'):
-        return [str(value) for value in result.txts if str(value).strip()]
+        return [str(value) for value in (result.txts or []) if str(value).strip()]
     if isinstance(result, tuple):
         result = result[0]
     found = []
