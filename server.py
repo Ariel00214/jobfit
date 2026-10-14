@@ -10,7 +10,8 @@ from job_links import read_job, platform_for, normalize_url
 ROOT=os.path.dirname(__file__)
 _OCR_RUN_LOCK=threading.Lock()
 _OCR_PROCESS=None
-OCR_WIDTH=1200;OCR_HEIGHT=1400;OCR_PIXELS=1700000;OCR_TIMEOUT=45
+OCR_VALIDATED_PIXELS=1700000;OCR_MAX_SIDE=12000;OCR_TIMEOUT=45
+OCR_MEMORY_RESERVE_MB=96;OCR_ESTIMATED_BYTES_PER_PIXEL=12;OCR_DETECTOR_SIDE=736;OCR_MIN_READABLE_WIDTH=240
 class OcrTemporaryError(Exception):pass
 class OcrTimeoutError(OcrTemporaryError):pass
 def memory_stats():
@@ -27,6 +28,17 @@ def memory_stats():
   stats['oomKills']=int(events.get('oom_kill',0))
  except (OSError,ValueError):pass
  return stats
+def ocr_capacity():
+ """Return a runtime OCR budget derived from cgroup headroom and measured inference cost."""
+ stats=memory_stats();current=stats.get('currentMb');limit=stats.get('limitMb')
+ if isinstance(current,(int,float)) and isinstance(limit,(int,float)):
+  headroom=max(0,limit-current-OCR_MEMORY_RESERVE_MB)
+  budget=int(headroom*1024*1024/OCR_ESTIMATED_BYTES_PER_PIXEL)
+  safe_pixels=max(250000,min(OCR_VALIDATED_PIXELS,budget))
+ else:safe_pixels=OCR_VALIDATED_PIXELS
+ return {'safePixels':safe_pixels,'validatedPixels':OCR_VALIDATED_PIXELS,
+         'detectorSide':OCR_DETECTOR_SIDE,'minReadableWidth':OCR_MIN_READABLE_WIDTH,
+         'busy':_OCR_RUN_LOCK.locked(),'reserveMb':OCR_MEMORY_RESERVE_MB,**stats}
 def read_file(name,data):
  name=name.lower()
  if len(data)>8*1024*1024:raise ValueError('文件不得超过 8 MB。')
@@ -139,7 +151,7 @@ def _read_worker_response(process,holder):
 def isolated_ocr_tile(prepared):
  """Use one bounded model process; timeout/crash kills it before another starts."""
  height,width=prepared.shape[:2]
- if width>OCR_WIDTH or height>OCR_HEIGHT or width*height>OCR_PIXELS:raise ValueError('图片分片尺寸超出安全范围，请重新选择截图。')
+ if max(width,height)>OCR_MAX_SIDE or width*height>OCR_VALIDATED_PIXELS:raise ValueError('图片超出当前 OCR 已验证的安全输入范围。')
  raw=prepared.tobytes();process=start_ocr_worker();holder=[]
  try:
   process.stdin.write(struct.pack('!III',width,height,len(raw))+raw);process.stdin.flush()
@@ -227,7 +239,9 @@ def recognize_slice(item):
  if len(data)>12*1024*1024:raise ValueError('单个图片分片不得超过 12 MB。')
  started=time.perf_counter();enhance=bool(item.get('enhance'));prepared=optimize_ocr_image(data,enhance)
  height,width=prepared.shape[:2]
- if width>OCR_WIDTH or height>OCR_HEIGHT or width*height>OCR_PIXELS:raise ValueError('图片分片尺寸超出安全范围，请重新选择截图。')
+ capacity=ocr_capacity()
+ if max(width,height)>OCR_MAX_SIDE or width*height>capacity['safePixels']:
+  error=ValueError('当前实例可用内存不足以安全识别整图，请使用受控分片。');error.code='ocr_resource_risk';raise error
  queued=time.perf_counter()
  with _OCR_RUN_LOCK:piece=isolated_ocr_tile(prepared).strip()
  queue_ms=(time.perf_counter()-queued)*1000;status,message=ocr_text_status(piece)
@@ -235,7 +249,7 @@ def recognize_slice(item):
  identity=f"{int(item.get('imageIndex',0))+1}:{int(item.get('partIndex',0))+1}/{int(item.get('totalParts',1))}"
  duration_ms=(time.perf_counter()-started)*1000
  print(f'[OCR] slice={identity} enhanced={enhance} status={status} size={width}x{height} queue={queue_ms:.0f}ms total={duration_ms:.0f}ms memory={memory_stats()}',flush=True)
- return {'text':piece,'status':status,'message':message,'enhanced':enhance,'retries':1 if enhance else 0,'durationMs':round(duration_ms)}
+ return {'text':piece,'status':status,'message':message,'enhanced':enhance,'retries':1 if enhance else 0,'durationMs':round(duration_ms),'mode':item.get('mode') or 'single'}
 def combine_ocr_parts(parts):
  if not isinstance(parts,list) or not 1<=len(parts)<=60:raise ValueError('请选择 1～10 张岗位截图。')
  grouped={};indexes=set();received={};expected={};identities={};coverage={}
@@ -301,6 +315,7 @@ class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
   path=self.path.split('?')[0]
   if path=='/api/health':return self.send(200,{'status':'ok',**(memory_stats() if 'stats=1' in self.path else {})})
+  if path=='/api/ocr-capacity':return self.send(200,ocr_capacity())
   if path=='/api/config':return self.send(200,{'visionConfigured':True,'visionMode':'local-ocr','maxJdImages':10})
   if path=='/':path='/index.html'
   if path not in ('/index.html','/app.js','/style.css'):return self.send(404,{'error':'Not found'})
@@ -364,7 +379,7 @@ class Handler(BaseHTTPRequestHandler):
    return self.send(404,{'error':'Not found'})
   except OcrTimeoutError as e:return self.send(504,{'error':str(e),'code':'ocr_timeout','retryable':True})
   except OcrTemporaryError as e:return self.send(503,{'error':str(e),'code':'ocr_worker_unavailable','retryable':True})
-  except ValueError as e:return self.send(400,{'error':str(e),'code':'invalid_input','retryable':False})
+  except ValueError as e:return self.send(409 if getattr(e,'code','')=='ocr_resource_risk' else 400,{'error':str(e),'code':getattr(e,'code','invalid_input'),'retryable':False})
   except (BrokenPipeError,ConnectionResetError,ConnectionAbortedError):return
   except Exception as e:
    print(f'[ERROR] {self.path}: {type(e).__name__}: {e}',flush=True)

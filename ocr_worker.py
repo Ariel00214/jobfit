@@ -67,7 +67,7 @@ def main():
         except EOFError:
             return
         try:
-            if not 1 <= width <= 1200 or not 1 <= height <= 1400 or byte_count != width * height * 3:
+            if not 1 <= width <= 12000 or not 1 <= height <= 12000 or width * height > 1700000 or byte_count != width * height * 3:
                 raise ValueError('OCR tile dimensions out of range')
             raw = read_exact(byte_count)
             image = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))

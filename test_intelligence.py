@@ -2,7 +2,7 @@ import os,sys,unittest,io,base64
 from unittest.mock import patch
 sys.path.insert(0,os.path.dirname(__file__))
 from intelligence import parse_resume,parse_jd,analyze,action_plan
-from server import full_analysis,image_mime,optimize_ocr_image,ocr_tiles,vision,recognize_slice,combine_ocr_parts,merge_adjacent_ocr,ocr_text_status,image_is_visually_blank
+from server import full_analysis,image_mime,optimize_ocr_image,ocr_tiles,vision,recognize_slice,combine_ocr_parts,merge_adjacent_ocr,ocr_text_status,image_is_visually_blank,ocr_capacity
 from ocr_worker import lines as ocr_lines
 from engine import parse_jd as parse_legacy_jd
 
@@ -127,5 +127,10 @@ class JobFitTests(unittest.TestCase):
          {'imageIndex':0,'partIndex':1,'totalParts':2,'status':'blank','text':''}]
   self.assertIn('岗位职责',combine_ocr_parts(parts))
   self.assertEqual(ocr_lines(type('EmptyResult',(),{'txts':None})()),[])
+ def test_runtime_ocr_capacity_preserves_headroom(self):
+  with patch('server.memory_stats',return_value={'currentMb':280,'limitMb':512,'peakMb':300,'oomKills':0}):
+   capacity=ocr_capacity();self.assertEqual(capacity['safePixels'],1700000);self.assertEqual(capacity['reserveMb'],96)
+  with patch('server.memory_stats',return_value={'currentMb':410,'limitMb':512,'peakMb':420,'oomKills':0}):
+   capacity=ocr_capacity();self.assertEqual(capacity['safePixels'],524288);self.assertLess(capacity['safePixels'],capacity['validatedPixels'])
 
 if __name__=='__main__':unittest.main()

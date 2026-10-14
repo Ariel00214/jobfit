@@ -100,16 +100,18 @@ def main():
                     assert '技术内容' in raw and '2-3年相关运营经验' in raw and page.evaluate('state.jds.length') == 1, raw
                     records.append(('two-ordinary-941x2048', 2, 0, len(raw))); context.close()
 
-                    # An 8000px image remains a bounded true-long-image path.
+                    # An 8000px image is still prepared as one complete candidate.
+                    # Its model-readability risk is recorded, so fallback is deferred until after
+                    # the complete-image OCR attempt rather than happening during upload.
                     context = browser.new_context(viewport={'width': 1440, 'height': 900})
                     page = context.new_page(); page.goto(f'http://127.0.0.1:{server.server_port}')
                     page.locator('#add').click(); page.locator('[data-mode="image"]').click()
                     page.locator('#jd-image').set_input_files(str(ultra)); page.get_by_text('1 张已就绪', exact=True).wait_for()
-                    ultra_layout = page.evaluate('state.jdImages.map(x=>({top:x.coverageTop,bottom:x.coverageBottom,total:x.totalParts,height:x.scaledHeight}))')
-                    assert 5 <= len(ultra_layout) <= 7, ultra_layout
-                    assert ultra_layout[0]['top'] == 0 and ultra_layout[-1]['bottom'] == ultra_layout[-1]['height']
-                    assert all(b['top'] <= a['bottom'] for a,b in zip(ultra_layout, ultra_layout[1:])), ultra_layout
-                    records.append(('ultra-8000-layout', len(ultra_layout), 0, 0)); context.close()
+                    ultra_layout = page.evaluate('state.jdImages.map(x=>({top:x.coverageTop,bottom:x.coverageBottom,total:x.totalParts,height:x.scaledHeight,qualityRisk:x.qualityRisk,mode:x.mode}))')
+                    assert len(ultra_layout) == 1 and ultra_layout[0]['total'] == 1, ultra_layout
+                    assert ultra_layout[0]['top'] == 0 and ultra_layout[0]['bottom'] == ultra_layout[0]['height']
+                    assert ultra_layout[0]['qualityRisk'] and ultra_layout[0]['mode'] == 'single', ultra_layout
+                    records.append(('ultra-8000-upload-single', len(ultra_layout), 0, 0)); context.close()
 
                     # Retrying after a later slice fails must reuse the earlier successful slice.
                     context = browser.new_context(viewport={'width': 1440, 'height': 900})
@@ -124,9 +126,9 @@ def main():
                     page.goto(f'http://127.0.0.1:{server.server_port}')
                     page.locator('#add').click(); page.locator('[data-mode="image"]').click()
                     page.locator('#jd-image').set_input_files(str(longer)); page.get_by_text('1 张已就绪', exact=True).wait_for()
-                    page.locator('#save-jd').click(); page.wait_for_function('document.querySelector(".alert")?.textContent.includes("内容可能不完整")')
-                    page.locator('#save-jd').click(); page.wait_for_function('() => !state.busy && Object.values(state.jdOcrCache).length === 1')
-                    assert calls.get(0) == 1 and calls.get(1) == 6, calls
+                    page.locator('#save-jd').click(); page.wait_for_function('() => !state.busy && !!document.querySelector(".alert")')
+                    page.locator('#save-jd').click(); page.wait_for_function('() => !state.busy && Object.values(state.jdOcrCache).length === 2')
+                    assert calls.get(0) == 2 and calls.get(1) == 6, calls
                     assert page.evaluate('state.jds.length') == 0
                     records.append(('partial-retry-cache', sum(calls.values()), 0, 0)); context.close()
 
@@ -141,7 +143,7 @@ def main():
                     page.locator('#add').click(); page.locator('[data-mode="image"]').click()
                     page.locator('#jd-image').set_input_files(str(long)); page.get_by_text('1 张已就绪', exact=True).wait_for()
                     page.locator('#save-jd').click(); page.locator('.alert').first.wait_for()
-                    assert 'JD 内容可能不完整' in page.locator('.alert').first.inner_text()
+                    assert '未启动无意义切片' in page.locator('.alert').first.inner_text()
                     assert calls['count'] == 3 and page.evaluate('state.jds.length') == 0
                     records.append(('injected-failure', calls['count'], 0, 0)); context.close()
 
