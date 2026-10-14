@@ -10,7 +10,7 @@ from job_links import read_job, platform_for, normalize_url
 ROOT=os.path.dirname(__file__)
 _OCR_RUN_LOCK=threading.Lock()
 _OCR_PROCESS=None
-OCR_VALIDATED_PIXELS=1700000;OCR_MAX_SIDE=12000;OCR_TIMEOUT=45
+OCR_VALIDATED_PIXELS=900000;OCR_MAX_SIDE=12000;OCR_TIMEOUT=45
 OCR_MEMORY_RESERVE_MB=96;OCR_ESTIMATED_BYTES_PER_PIXEL=12;OCR_DETECTOR_SIDE=736;OCR_MIN_READABLE_WIDTH=240
 class OcrTemporaryError(Exception):pass
 class OcrTimeoutError(OcrTemporaryError):pass

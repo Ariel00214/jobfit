@@ -2,6 +2,7 @@
 
 Usage: python tests/real_image_flow.py first.png second.png
 """
+import os
 import sys
 import threading
 import time
@@ -16,8 +17,11 @@ def main():
     if len(sys.argv) != 3:
         raise SystemExit('usage: real_image_flow.py first.png second.png')
     paths = [str(Path(value).resolve()) for value in sys.argv[1:]]
-    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base_url = os.environ.get('JOBFIT_BASE_URL', '').rstrip('/')
+    server = None if base_url else ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    if server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base_url = f'http://127.0.0.1:{server.server_port}'
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
@@ -25,7 +29,7 @@ def main():
                 page = browser.new_page(viewport={'width': 390, 'height': 844}, is_mobile=True)
                 requests = []
                 page.on('requestfinished', lambda request: requests.append(request) if request.url.endswith('/api/ocr-slice') else None)
-                page.goto(f'http://127.0.0.1:{server.server_port}')
+                page.goto(base_url, timeout=120000)
                 page.locator('#add').click(); page.locator('[data-mode="image"]').click()
                 started = time.perf_counter(); page.locator('#jd-image').set_input_files(paths)
                 page.get_by_text('2 张已就绪', exact=True).wait_for()
@@ -43,7 +47,8 @@ def main():
             finally:
                 browser.close()
     finally:
-        server.shutdown(); server.server_close()
+        if server:
+            server.shutdown(); server.server_close()
 
 
 if __name__ == '__main__':

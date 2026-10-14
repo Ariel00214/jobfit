@@ -75,7 +75,7 @@ class JobFitTests(unittest.TestCase):
   self.assertEqual(self_shapes,shapes)
  def test_sequential_slice_ocr_combines_into_one_job(self):
   from PIL import Image
-  source=io.BytesIO();Image.new('RGB',(1134,900),'white').save(source,'JPEG')
+  source=io.BytesIO();Image.new('RGB',(1000,800),'white').save(source,'JPEG')
   with patch('server.isolated_ocr_tile',return_value='浙江连信科技有限公司正在招聘\n内容增长（AI内容方向)\n负责内容策略与用户增长。'):
    first=recognize_slice({'name':'part1.jpg','mime':'image/jpeg','data':base64.b64encode(source.getvalue()).decode()})['text']
   combined=combine_ocr_parts([{'imageIndex':0,'partIndex':0,'totalParts':2,'text':first},{'imageIndex':0,'partIndex':1,'totalParts':2,'text':'任职要求：熟悉内容运营和数据分析。'}])
@@ -129,7 +129,7 @@ class JobFitTests(unittest.TestCase):
   self.assertEqual(ocr_lines(type('EmptyResult',(),{'txts':None})()),[])
  def test_runtime_ocr_capacity_preserves_headroom(self):
   with patch('server.memory_stats',return_value={'currentMb':280,'limitMb':512,'peakMb':300,'oomKills':0}):
-   capacity=ocr_capacity();self.assertEqual(capacity['safePixels'],1700000);self.assertEqual(capacity['reserveMb'],96)
+   capacity=ocr_capacity();self.assertEqual(capacity['safePixels'],900000);self.assertEqual(capacity['reserveMb'],96)
   with patch('server.memory_stats',return_value={'currentMb':410,'limitMb':512,'peakMb':420,'oomKills':0}):
    capacity=ocr_capacity();self.assertEqual(capacity['safePixels'],524288);self.assertLess(capacity['safePixels'],capacity['validatedPixels'])
 
